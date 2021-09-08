@@ -1,0 +1,391 @@
+---
+title: "ATAC differential accessibility"
+author: "Romuald Parmentier"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+output: 
+  html_document :
+    df_print: kable
+    highlight: default
+    theme : journal
+    code_folding: hide
+    number_sections: yes
+    toc: yes
+    toc_float:
+      collapsed: no
+      smooth_scroll: yes
+    self_contained : yes
+---
+
+```{r Dependencies, message=FALSE, hide = T}
+
+library(DESeq2)
+library(stringr)
+library(tidyverse)
+library(ggthemes)
+library(Rsubread)
+library(kableExtra)
+library(GenomicRanges)
+
+```
+
+```{r Function definition, hide = T}
+
+loadRData <- function(fileName){
+  #loads an RData file, and returns it
+  load(fileName)
+  get(ls()[ls()!="fileName"])
+  
+}
+
+```
+
+# Readcount in common regions between time intervals
+
+The first part of this script aims to calculate the number of reads associated to the common regions between two time points.\
+\
+To perform this, the script needs the "peaks_XXh.csv" to calculate the common regions between two consecutive time points (ie. 00h & 05h, 05h & 24h, 24h & 48h). Theses regions were defined as the union of peaks between two consecutive time points. Then the script needs the "XXX_downsampled.bam" files in order to count the reads overlaping within the regions of interest\
+\
+The output corresponds to a matrix where each line represents a region (resulting from the union), and each of the six columns display the number of reads detected in this regions, for each of the donor and the two time points belonging to the time interval.
+\
+**Warning** : the union of peaks detected between two time point can generate regions where a peak has effectively been detected at t (or t+1) but not at the second time point. These regions where evicted of the analysis. Indeed, even if DEseq2 is able to infer a FoldChange (based on the distribution of the reads for the positive condition) for these cases, we prefered to avoid it.
+
+```{r readcount on time interval union}
+
+label_correspondance =
+  read.delim("/media/romuald/TOSHIBA EXT/Romuald_NGS/MARS-ATAC/data/broadPeak_label_correspondance.csv")  
+
+peaks_files = list.files(
+  path = "/media/romuald/TOSHIBA EXT/Romuald_NGS/MARS-ATAC/exp/ATAC_peak_annotation/2021_01_01/",
+  pattern = "csv",
+  full.names = T)
+
+bam_files = list.files("/media/romuald/TOSHIBA EXT/Romuald_NGS/MARS-ATAC/exp/ATAC_bam_downsampling/2021_01_01/",
+  pattern = "bam",
+  full.names = T
+  )
+
+union_region_list = list() 
+
+times = c("00h", "05h", "24h", "48h")
+
+for(i in 1:(length(times)-1)){
+  
+  print(paste("Time interval:", times[i],"and", times[i+1]))
+  
+  # Define peaks (region) where to count reads, according time interval
+  peaks_file_path = as.list(
+    peaks_files[which(
+    str_detect(
+      string = peaks_files, 
+      pattern = paste0(c(times[i],times[i+1]), collapse = "|")))]
+    )
+  
+  # Load .csv peak file in a list
+  peaks_time_interval = lapply(peaks_file_path, read.csv2)
+
+  # Transform this list in a list of Granges to generate regions resulting from union between time interval
+  for(j in 1:length(peaks_time_interval)) {
+    
+    peaks_time = peaks_time_interval[[j]]
+     
+    peaks_time = peaks_time[,c(1:4,6)] %>%
+      dplyr::mutate(GeneID = paste(times[i], X, sep="_peak_") ) %>%
+      dplyr::rename(Chr = seqnames, Start = start, End = end, Strand = strand) %>%
+      dplyr::select(- X) %>%
+      dplyr::select(GeneID, Chr, Start, End, Strand)
+    
+    peaks_time = makeGRangesFromDataFrame(peaks_time)
+    peaks_time_interval[[j]] = peaks_time
+    
+  }
+  
+  # Calculate the union of Grange
+  peaks_union_time_interval = Reduce(
+      GenomicRanges::union, 
+      peaks_time_interval)
+  
+  # Find overlap with static peaks in order to keep only the regions touching a peak at both times
+  
+  mt_1 = findOverlaps(
+    query = peaks_union_time_interval, 
+    subject = peaks_time_interval[[1]] # Static peaks at t
+    )
+  
+  mt_2 = findOverlaps(
+    query = peaks_union_time_interval, 
+    subject = peaks_time_interval[[2]] # Static peaks at t+1
+    )
+  
+  # Calculate the union of Grange
+  peaks_union_time_interval = as_tibble(peaks_union_time_interval)
+  
+  # Arrange the data frame
+  peaks_union_time_interval = peaks_union_time_interval %>%
+    dplyr::mutate(GeneID = paste0(
+      "union_", times[i], "_", times[i+1], "_region_", 1:nrow(peaks_union_time_interval))) %>%
+      dplyr::rename(Chr = seqnames, Start = start, End = end, Strand = strand) %>%
+      dplyr::select(GeneID, Chr, Start, End, Strand) %>%
+      mutate(overlap_t1 = FALSE, overlap_t2 = FALSE) 
+  
+  peaks_union_time_interval[unique(queryHits(mt_1)),"overlap_t1"] = TRUE # TRUE when region overlaps a static peak at t
+  peaks_union_time_interval[unique(queryHits(mt_2)),"overlap_t2"] = TRUE # TRUE when region overlaps a static peak at t+1
+  
+  peaks_union_time_interval = peaks_union_time_interval %>% filter(overlap_t1 == TRUE & overlap_t2 == TRUE)
+
+  # Adding it to a list for latter purpose
+  union_region_list[[i]] = peaks_union_time_interval
+  
+  # Define samples lables associated to the peaks composing the region resulting from the union
+  labels_time_interval = as.vector.factor(
+    label_correspondance$Label[label_correspondance$Time %in% c(times[i],times[i+1])])
+  
+  # List the bamfiles associated to the peaks composing the region resulting from the union thanks to labels
+  bam_files_time_interval = bam_files[which(
+    str_detect(string = bam_files, 
+      pattern = paste0(labels_time_interval, collapse = "|")))]
+  
+  # Reorder the list of bam files according the label corresponding to times
+  bam_files_time_interval_ordered = character()
+  for(k in 1:length(bam_files_time_interval)){
+    
+    label_to_match = labels_time_interval[k]
+    bam_files_time_interval_ordered[k] = bam_files_time_interval[grep(
+      pattern = label_to_match, 
+      x = bam_files_time_interval)] 
+    
+  }
+  
+  # Count the number of reads, for each sample, present in the region resulting from the union
+  readCount <- featureCounts(files = bam_files_time_interval_ordered,
+                             annot.ext = peaks_union_time_interval,  
+                           isPairedEnd = TRUE,
+                           nthreads = 1,
+                           countChimericFragments = FALSE,
+                           countMultiMappingReads = TRUE)
+  
+  matrix_count = readCount$counts
+  
+  write.csv2(
+    x = matrix_count, 
+    file = paste0("/media/romuald/TOSHIBA EXT/Romuald_NGS/MARS-ATAC/exp/ATAC_differential_accessibility/2021_01_01/readcount_peaks_union_", 
+      times[i],
+      "_",
+      times[i+1],
+      ".csv"))
+  
+  print(paste("reacount matrix (.csv file) for the regions between", times[i+1],"and",times[i],"generated"))
+  
+  matrix_count[1:100,] %>% 
+    kable %>%
+    kable_styling("striped", full_width = T) %>% 
+    scroll_box()
+  
+}
+
+```
+
+# Differential analysis on peaks present between two consecutive time points
+\
+The second part of this script uses DEseq2 to calculate the foldchange and the p-value associated to differential accessibility among the regions determined in the previous part
+```{r DEseq2 on readcount matrix (interval union)}
+
+matrix_readcount_union_files = list.files(
+  path = "/media/romuald/TOSHIBA EXT/Romuald_NGS/MARS-ATAC/exp/ATAC_differential_accessibility/2021_01_01/",
+  pattern = "union",
+  full.names = T)
+
+times = c("00h","05h","24h","48h")
+DEseq_res_list = list()
+
+for(i in 1:(length(times)-1)){
+
+  matrix_count_union_path = matrix_readcount_union_files[which(
+    str_detect(
+      string = matrix_readcount_union_files,
+      pattern = paste0(times[i], "_", times[i+1])))]
+
+  matrix_count_union = read.csv2(matrix_count_union_path)
+
+  # DEseq2 parameters
+  coldata <- data.frame(
+    condition = c(rep("before",3), rep("after",3)), 
+    type = rep("paired-end", 6)) 
+
+  # Run DEseq
+  dds <- DESeqDataSetFromMatrix(
+    countData = matrix_count_union[,-1], 
+    colData = coldata, 
+    design = ~ condition)
+  
+  dds$condition <- relevel(dds$condition, ref = "before") # Setting the samples tagged "before" as reference
+
+  dds <- DESeq(dds)
+  res <- results(dds)
+
+  res = as_tibble(res)
+  res = res %>% 
+    mutate(region = paste0("union_", times[i], "_", times[i+1], "_region_", 1:nrow(res))) %>%
+    relocate(region, .before = baseMean)
+  
+  DEseq_res_list[[i]] = res
+
+}
+
+```
+
+Each of the regions are then associated to a genomic feature to be ploted latter
+
+```{r Annotate DEseq2 results}
+
+# 1 Annotate the region resulting from the union of peaks at two consecutive times
+
+all_annotations = loadRData(
+  "/media/romuald/TOSHIBA EXT/Romuald_NGS/MARS-ATAC/data/Annotation_TSS_pm1kb_int_ex_53utr_ctcf_cpg_woThisto_FANTOM5_prom_gr.rda")
+
+annotations_types = levels(factor(all_annotations$annotation))
+
+times = c("00h","05h","24h","48h")
+
+for(interval in 1:length(union_region_list)){
+  
+  gr = makeGRangesFromDataFrame(union_region_list[[interval]])
+
+  # First a matrix is created filled with FALSE and added to the Grange
+  metadata = matrix(FALSE, ncol = length(annotations_types), nrow = length(gr))
+  colnames(metadata) = annotations_types
+  mcols(gr) = metadata
+
+  # for each of the annotations types an overlap is calculated and used to assigned the peak as TRUE when overlapping with the annotation
+  for (i in 1:ncol(metadata)){
+    sub_annot = all_annotations[all_annotations$annotation == annotations_types[i]]
+    overlaps = findOverlaps(gr, sub_annot)
+    mcols(gr)[queryHits(overlaps),i] = TRUE
+  }
+  
+  colnames(mcols(gr)) = c("UTR3P","UTR5P","CpG", "CTCF","Exons","FANTOM5_promoter","Introns","TSS_mp1kb")
+
+  mcols(gr) = as_tibble(mcols(gr)) %>%
+  dplyr::mutate(Intergenic = ifelse(UTR3P == FALSE & UTR5P == FALSE & Exons == FALSE & Introns == FALSE & TSS_mp1kb == FALSE & FANTOM5_promoter == FALSE , TRUE, FALSE)) %>%
+  dplyr::mutate(CpG_Intergenic = ifelse(Intergenic == TRUE & CpG == TRUE, TRUE, FALSE)) %>%
+  dplyr::mutate(CpG_Intergenic = ifelse(Intergenic == TRUE & CpG == TRUE, TRUE, FALSE)) %>%
+  dplyr::mutate(CTCF_Intergenic = ifelse(Intergenic == TRUE & CTCF == TRUE, TRUE, FALSE)) %>%
+  dplyr::mutate(CTCF_in_intron = ifelse(Introns == TRUE & CTCF == TRUE, TRUE, FALSE)) %>%
+  dplyr::mutate(CTCF_in_exon = ifelse(Exons == TRUE & CTCF == TRUE, TRUE, FALSE))
+  
+  df = as_tibble(gr)
+  df = df %>% 
+    dplyr::mutate(region = paste0("union_", times[interval], "_", times[interval+1], "_region_", 1:nrow(union_region_list[[interval]]))) %>%
+    relocate(region, .before = seqnames)
+  
+  union_region_list[[interval]] = df
+  names(union_region_list)[interval] = paste0("union_",times[interval],"_",times[interval+1],"_gr_annotated")
+  
+}
+
+
+# 2 Adding the information concerning region resulting from the union to DEseq results
+
+for(i in 1:(length(times)-1)){
+  
+  DEseq_results = DEseq_res_list[[i]]
+  
+  DEseq_results = DEseq_results %>% 
+    mutate(
+      regulation = case_when(
+        pvalue < 0.01 ~ "significative",
+        pvalue > 0.01 ~ "Non-significative"))
+  
+  # Adding start|end|seqnames informations to regions
+  colnames(union_region_list[[i]])[1] = "region"
+  
+  DEseq_results_annotated = left_join(
+    DEseq_results,
+    union_region_list[[i]],
+    by = "region") 
+  
+  write.csv2(
+    x = DEseq_results_annotated,
+    file = paste0(
+      "/media/romuald/TOSHIBA EXT/Romuald_NGS/MARS-ATAC/exp/ATAC_differential_accessibility/2021_01_01/DEseq_results_",
+      times[i],"_",times[i+1],"_annotated.csv"))
+}
+
+```
+
+# Final plot representation
+\
+Volcano plot are used to represent the FoldChange over the p-value. Only a p-value threshold has been set. \
+Only the regions corresponding to promoters and intergenic regions are represented here.
+
+```{r Volcano plot}
+
+DEseq_files = list.files(
+  path = "/media/romuald/TOSHIBA EXT/Romuald_NGS/MARS-ATAC/exp/ATAC_differential_accessibility/2021_01_01/",
+  pattern = "DEseq",
+  full.names = T)
+
+time_interval = c("00h_05h", "05h_24h", "24h_48h")
+
+df_regions = tibble()
+
+for(i in 1:length(time_interval)){
+
+  DEseq_file_path = DEseq_files[which(
+    str_detect(
+      string = DEseq_files,
+      pattern = time_interval[i]))]
+  
+  DEseq_results = read.csv2(DEseq_file_path)
+  
+  DEseq_results_long = DEseq_results %>% 
+    pivot_longer(
+      cols = UTR3P:CTCF_in_exon, 
+      names_to = "feature", 
+      values_to = "feature_overlap")
+  
+  df_plot = DEseq_results_long %>% filter(feature == "FANTOM5_promoter" & feature_overlap == TRUE | feature == "Intergenic" & feature_overlap == TRUE )
+  
+  plot <- ggplot() +
+    geom_point(
+      data = df_plot, 
+      aes(x = log2FoldChange, y = -1 * log10(pvalue), colour = feature), 
+      size = 3, alpha = 0.5, fill = NA, shape = 21, stroke = 2) +
+    geom_hline(aes(yintercept = 2), colour = "red", linetype = "dashed") +
+    geom_text(label = "p-value = 0.01", colour = "red", aes(x = -6, y = 3)) +
+    scale_color_manual(name = "Genomic feature", values = c("#0072B2","#F0E442")) +
+    scale_x_continuous(limits = c(-7, 7)) + 
+    ylim(NA, 20) +
+    labs(subtitle = paste(time_interval[i]),
+      x = "log2(FoldChange)",
+      y = "-log10(Pvalue)") +
+    theme_tufte()+
+    theme(
+      axis.line.y = element_line(color = "black"),
+      axis.line.x = element_line(color = "black"),
+      legend.text = element_text(size = 10),
+      legend.title = element_text(size = 11),
+      axis.title = element_text(size = 10),
+      plot.subtitle = element_text(size = 14, hjust = 0.5))
+  
+  print(plot)
+  
+  ggsave(
+    plot = plot,
+    filename =  paste0("/media/romuald/TOSHIBA EXT/Romuald_NGS/MARS-ATAC/exp/ATAC_differential_accessibility/2021_01_01/plot_volcano_promoter_intergenic_", time_interval[i],".png"))
+  
+  df_summarize = df_plot %>% 
+    filter(feature == "FANTOM5_promoter" | feature == "Intergenic") %>% 
+    mutate(interval = time_interval [i]) %>%
+    mutate(status = case_when(log2FoldChange > 0 ~ "Opening", log2FoldChange < 0 ~ "Closing")) %>% 
+    group_by(regulation, status, interval) %>% summarise(n_regions = n()) %>%
+    filter(!is.na(regulation))
+  
+  df_regions = bind_rows(df_regions, df_summarize)
+  
+} 
+
+kable(df_regions) %>% 
+  kable_styling(bootstrap_options = "striped") 
+
+```
+

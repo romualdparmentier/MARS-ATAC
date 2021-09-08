@@ -1,0 +1,1010 @@
+---
+title: "ATAC peaks dynamics"
+author: "Romuald Parmentier"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+output: 
+  html_document :
+    df_print: kable
+    highlight: default
+    theme : journal
+    code_folding: hide    
+    number_sections: yes
+    toc: yes
+    toc_float:
+      collapsed: no
+      smooth_scroll: yes
+    self_contained : yes
+---
+
+```{r Dependencies, message=FALSE, hide = T}
+
+library(GenomicRanges)
+library(dplyr)
+library(ggplot2)
+library(stringr)
+library(ggthemes)
+library(tidyr)
+library(gridExtra)
+library(tidyverse)
+library(rlang) # pour utiliser case_when(!!!parse_exprs)
+
+```
+
+```{r Directories, message=FALSE, hide = T}
+
+# Direction de travail
+
+dir_data = "/media/romuald/TOSHIBA EXT/Romuald_NGS/MARS-ATAC/data/"
+dir_data_peaks = "/media/romuald/TOSHIBA EXT/Romuald_NGS/MARS-ATAC/exp/ATAC_peak_annotation/2021_01_01/"
+dir_data_readscount = "/media/romuald/TOSHIBA EXT/Romuald_NGS/MARS-ATAC/exp/ATAC_peak_readcount/2021_01_01/"
+
+```
+
+```{r Function definition, hide = T}
+
+# Fonction pour charger les fichiers rda
+loadRData<-function(fileName){
+  #loads an RData file, and returns it
+  load(fileName)
+  get(ls()[ls()!="fileName"])
+}
+
+# Foonction générique pour ploter les différentes dynamiques de peaks
+plot_facet = function(tab, var_x, var_y, var_group, var_colour, var_alpha, var_text, var_title, var_ylab, var_facet, var_tendency, var_mean, y_lim, text_y){
+  
+  ggplot(tab, aes(x = var_x, y = var_y, group = var_group))+
+    geom_line(alpha = var_alpha, color = var_colour) +
+    geom_line(aes(x = var_x, y = var_tendency), colour = var_mean, linetype = "dashed") +
+    geom_text(aes(label = var_text, x= 20, y=text_y), color = "black", size = 3) +
+    scale_x_continuous(
+      breaks = 0:48, 
+      labels = c("00h",rep("",4),"05h",rep("",18),"24h",rep("",23),"48h") , 
+      limits = c(0,48)) +
+    scale_y_continuous(limits = y_lim) +
+    theme_bw() +
+    ggtitle(var_title) +
+    ylab(var_ylab)+
+    theme(legend.position = "none",
+      legend.title = element_blank(),
+      legend.text = element_text(size = 8),
+      plot.title = element_text(hjust = 0.5, face = "bold", colour = "black", size = 18),
+      strip.text.x = element_blank(),
+      axis.line.y = element_line(colour = "black"),
+      axis.line.x = element_line(colour = "black"),
+      axis.text.y = element_text(size = 8, colour = "black"),
+      axis.text.x = element_text(vjust = -0.5, size = 6, colour = "black"),
+      axis.title.y = element_text(vjust = 1 ,size = 10),
+      axis.ticks.x = element_blank(),
+      axis.title.x = element_blank(),
+      strip.text = element_text(size = 8),
+      panel.grid.major = element_blank(),
+      panel.grid.minor = element_blank(),
+      panel.border = element_blank(),
+      text = element_text(size = 8),
+      panel.spacing.x = unit(6, "mm")) +
+    facet_wrap(facets = var_facet, scales = "free_x") 
+}
+
+# Fonction pour charger les fichiers de peaks et de nbreads et fusion des deux 
+peaks_reads_fun = function(peaks_name, readcount_name) {
+  # Charge le readcount
+  readcount = read.table(paste0(dir_data_readscount, readcount_name), sep = ";", header = TRUE)
+  # Ajout d'un threshold sur le nb de reads (somme des donneurs doit être >=10) et calcul la moyenne des reads sur les donneurs
+  readcount = readcount %>% 
+    dplyr::mutate(sum_nbreads = apply(readcount[,2:ncol(readcount)], 1, sum)) %>%
+    dplyr::mutate(threshold_passed = ifelse(sum_nbreads >=10, TRUE, FALSE))%>%
+    dplyr::mutate(mean_nbreads = round(apply(readcount[,2:ncol(readcount)], 1, mean))) %>%
+    dplyr::select(X, mean_nbreads, threshold_passed) %>%
+    dplyr::rename(peakID = "X")
+  # Charge la liste de peaks et ajoute l'information du timing
+  peaks = read.csv2(paste0(dir_data_peaks, peaks_name)) %>% 
+    dplyr::mutate(time = str_extract(string = peaks_name, pattern = "(?<=peaks_)\\d{2}h")) %>%
+    dplyr::mutate(peakID = paste0(str_sub(string = peaks_name,start = 7, end = 9),"_peak_", X)) %>%
+    dplyr::select(-X)
+  # Fusionne les deux informations dans un Grange (liste de peaks et readcount)
+  peaks = makeGRangesFromDataFrame(df = left_join(peaks, readcount, by ='peakID'), 
+    keep.extra.columns = TRUE, 
+    ignore.strand = FALSE, 
+    seqnames.field = "seqnames",
+    start.field = "start", 
+    end.field = "end", 
+    strand.field = "strand")
+  # Enlève les peaks qui ne passent pas le threshold
+  peaks = peaks[which(peaks$threshold_passed == TRUE)]
+  # Enlève la colonne threshold_passed désormais inutile
+  mcols(peaks) = mcols(peaks)[,-22]
+  
+  return(peaks)
+}
+
+prom_fun = function(peaks, prom_tab) {
+  # Cherche la correspondance entre peaks et gènes
+  peaks_prom = findOverlaps(peaks, prom_tab)
+  overlap_peaks_nb = queryHits(peaks_prom)
+  overlap_prom_nb = subjectHits(peaks_prom)
+  cor_peak_prom_gene = tibble("peakID" = peaks[overlap_peaks_nb,]$peakID, "region" = prom_gene_fantom_gr$gene[overlap_prom_nb])
+  # Enlève les lignes identiques (même peak - même gène associé)
+  cor_peak_prom_gene = distinct(cor_peak_prom_gene)
+  # Enlève les peaks associés à plusieurs gènes 
+  cor_peak_prom_gene = distinct(cor_peak_prom_gene, peakID, .keep_all = TRUE)
+  # Enlève les gènes qui correspondent à plusieurs peaks 
+  df = left_join(as.data.frame(peaks), cor_peak_prom_gene, by ='peakID') %>% 
+    dplyr::filter(region != "NA") %>%
+    group_by(region, time) %>%
+    dplyr::mutate(freq = n()) %>%
+    dplyr::filter(freq == 1) %>%
+    dplyr::select(-freq)
+  # Ajoute le nom des promoteurs dans le Grange d'entrée (on conserve seulement les peaks qui tombent dans des gènes)
+  peaks = makeGRangesFromDataFrame(df = df, 
+    keep.extra.columns = TRUE, 
+    ignore.strand = FALSE, 
+    seqnames.field = "seqnames",
+    start.field = "start", 
+    end.field = "end", 
+    strand.field = "strand")
+  
+  
+  return(peaks)
+}
+
+extract_combinaison = function(df, var_exp){
+  
+  # Transformation du tableau en binaire : 0 quand pas de reads, 1 quand il y a des reads 
+  tab = df %>% dplyr::filter(exp == var_exp)  %>% 
+    dplyr::mutate(value_binaire = ifelse(mean_nbreads == 0, 0, 1)) %>%
+    dplyr::mutate(time = case_when(time == "00h" ~ "t1", time =="05h" ~ "t2", time =="24h" ~ "t3", time == "48h" ~ "t4")) %>%
+    dplyr::select(time, region, value_binaire) %>%
+    group_by(time, region) %>% 
+    tidyr::spread(time, value_binaire) %>%
+    remove_rownames %>% 
+    column_to_rownames(var="region")
+  
+  # Création du tableau des combinaisons existantes
+  if (str_detect(var_exp, pattern = "ATAC")) {
+    list_combinaisons = expand(tab, nesting(t1, t2, t3, t4))
+  } else {
+    list_combinaisons = expand(tab, nesting(t2, t3, t4, t5, t6))
+  }
+  
+  # Extraction du nom des gènes associé à chacune des combinaisons 
+  list_regions_combinaison = list()
+  
+  for (i in 1:nrow(list_combinaisons)) {
+    names_combinaison = c()
+    for (j in 1:nrow(tab)) {
+      if (nrow(intersect(tab[j,], list_combinaisons[i,])) != 0) {
+        names_combinaison = append(names_combinaison, rownames(tab[j,]))}
+    }
+    list_regions_combinaison[[i]] = names_combinaison
+  }
+  
+  name_gene = tab %>% 
+    rownames_to_column("region") %>%
+    dplyr::mutate(combinaison = case_when(!!!parse_exprs(paste0("region %in% list_regions_combinaison[[", c(1:length(list_regions_combinaison)),
+      "]] ~ '",c(paste0("combinaison", c(1:length(list_regions_combinaison)))),"'")))) %>%
+    dplyr::select(region, combinaison)
+  
+  def_combi = list_combinaisons %>% 
+    tidyr::unite(col = def_combi, sep = "_", remove = TRUE) %>%
+    tibble::rownames_to_column("index") %>%
+    dplyr::mutate(combinaison = paste0("combinaison", index)) %>%
+    dplyr::select(-index)
+  
+  # Ajout de l'information de la combinaison dans le tableau principal
+  df_combi = full_join(df %>% dplyr::filter(exp == var_exp), name_gene, by = "region") %>%
+    group_by(combinaison) %>%
+    dplyr::mutate(nb_peak = ifelse(str_detect(var_exp, pattern = "ATAC"), n()/4, n()/5)) %>%
+    ungroup() %>%
+    group_by(combinaison, time, exp) %>%
+    dplyr::mutate(mean_tendency = mean(mean_nbreads),
+      mean_tendency_log2 = mean(mean_nbreads_log2),
+      mean_tendency_pct = mean(max_value_ratio))
+  df_combi = full_join(df_combi, def_combi, by = "combinaison")
+  
+  df_combi = df_combi %>% group_by(combinaison) %>% mutate(nb_genes = n()/4)
+  
+  df_combi = df_combi %>% mutate(
+    time_value = case_when(
+      time == "00h" ~ 0,
+      time == "05h" ~ 5,
+      time == "24h" ~ 24,
+      time == "48h" ~ 48))
+  
+  return(df_combi)
+  
+}
+
+```
+
+# 1: étude des peaks situés dans les promoteurs
+
+Il s'agit de suivre individuellement les peaks qui se trouvent dans les promoteurs (liste de promoteurs FANTOM5) dans le temps et de voir leur évolution.\
+\
+Les peaks pouvant ne plus être détectés à un point donné dans le temps, plusieurs profils de dynamique peuvent émerger. Nous avons fait le choix de regrouper ces dynamiques dans plusieurs groupes différents : \
+\
+1 : le groupe des peaks dont la dynamique aboutit à une *fermeture*. C'est à dire que ces peaks peuvent être présents dès le début et s'être fermés par la suite, ou bien ils sont apparu de manière transitoire. Dans tous les cas, ces peaks sont absents à 48h.\
+\
+2 : le groupe des peaks dont la dynamique décrit une *ouverture*. C'est à dire qu'ils n'étaient pas présents à 0h, qu'ils ont ensuite apparu à un moment, et sont encore présents à 48h.\
+\
+3. le groupe de peaks avec une dynamique *stable*. Ces peaks sont présents dès le début et le reste jusqu'à la fin.\
+\
+(4.) Il reste un nombre très réduit (<5% des peaks totaux) pour lesquels la dynamique est peu interprétable du fait que ces derniers apparaissent et disparaissent de manère erratique". Ils ne sont pas représentés ici.\
+\
+*Précision* : la couleur correspond à celle utilisée dans les précédentes figures du papier MARS-ATAC : bleu pour les promoteurs, jaune pour les régions intergéniques. Les courbes en pointillés rouges représentent les tendances moyennes.
+
+```{r Création tableau travail - Promoteurs}
+
+# ATAC - Création des granges annotés avec le nombre de reads par peaks (appel de fonction) #
+#*******************************************************************************************#
+peaks_reads_00h = peaks_reads_fun("peaks_00h_annotated.csv", "readcount_peaks_00h.csv")
+peaks_reads_05h = peaks_reads_fun("peaks_05h_annotated.csv", "readcount_peaks_05h.csv")
+peaks_reads_24h = peaks_reads_fun("peaks_24h_annotated.csv", "readcount_peaks_24h.csv")
+peaks_reads_48h = peaks_reads_fun("peaks_48h_annotated.csv", "readcount_peaks_48h.csv")
+
+# Chargement du tableau des promoteurs et ajout de l'information dans le tableau peaks/nbreads (appel de fonction)
+prom_gene_fantom = loadRData(paste0(dir_data, "prom_gene_fantom.rda"))
+
+# Transformation du data frame des pormoteurs FANTOM5 en un GRange
+prom_gene_fantom_gr = GRanges(
+  seqnames = prom_gene_fantom$seqnames,
+  ranges = IRanges(
+    start = prom_gene_fantom$start,
+    end = prom_gene_fantom$end),
+)
+mcols(prom_gene_fantom_gr) = prom_gene_fantom$gene
+names(mcols(prom_gene_fantom_gr)) = "gene"
+
+peaks_reads_gene_00h = prom_fun(peaks_reads_00h, prom_gene_fantom_gr)
+peaks_reads_gene_05h = prom_fun(peaks_reads_05h, prom_gene_fantom_gr)
+peaks_reads_gene_24h = prom_fun(peaks_reads_24h, prom_gene_fantom_gr)
+peaks_reads_gene_48h = prom_fun(peaks_reads_48h, prom_gene_fantom_gr)
+
+# Création d'un tableau global - on rajoute les points de temps non détectés pour un gène en mettant le nombre de reads à zéro
+df_ATAC_prom = rbind(
+  as.data.frame(peaks_reads_gene_00h),
+  as.data.frame(peaks_reads_gene_05h), 
+  as.data.frame(peaks_reads_gene_24h), 
+  as.data.frame(peaks_reads_gene_48h)) %>%
+  dplyr::select(time, mean_nbreads, region) 
+
+missing_time = as.data.frame(table(df_ATAC_prom$time, df_ATAC_prom$region)) %>% 
+  dplyr::filter(Freq == 0) %>%
+  dplyr::rename(time = Var1, region = Var2, mean_nbreads = Freq)
+
+df_ATAC_prom = rbind(df_ATAC_prom, missing_time) %>%
+  dplyr::mutate(max_value_ratio = round(mean_nbreads/max(mean_nbreads)*100, 2)) %>%
+  dplyr::mutate(mean_nbreads_log2 = log2(mean_nbreads+1)) %>%
+  dplyr::mutate(exp = "ATAC_promotor")
+
+
+##########################################################################  
+### Identification des dynamiques d'évolution en nbreads au cours du temps
+##########################################################################
+
+# Regroupement selon les dynamiques - TOUS LES POINTS # 
+#*****************************************************#
+
+df_combi_ATAC_prom = extract_combinaison(df = df_ATAC_prom, var_exp = "ATAC_promotor")
+
+df = df_combi_ATAC_prom %>% 
+  dplyr:: mutate(group = case_when(combinaison %in% c("combinaison2", "combinaison4", "combinaison6", "combinaison8", "combinaison12", "combinaison14") ~ "closing_prom_peaks",
+    combinaison %in% c("combinaison1", "combinaison3", "combinaison7") ~ "opening_prom_peaks",
+    combinaison %in% c("combinaison15") ~ "stable_prom_peaks",
+    combinaison %in% c("combinaison5", "combinaison9", "combinaison10", "combinaison11", "combinaison13") ~ "group4"))
+
+
+
+# Regroupement selon les dynamiques - FERMETURE # 
+#***********************************************#
+
+df_closing_prom = df %>% dplyr::filter(group == "closing_prom_peaks")
+
+df_closing_prom$combinaison = factor(
+  x = df_closing_prom$combinaison, 
+  levels = c("combinaison8", "combinaison12", "combinaison14", "combinaison4", "combinaison6", "combinaison2"))
+
+# Regroupement selon les dynamiques - OUVERTURE # 
+#***********************************************#
+
+df_opening_prom = df %>% dplyr::filter(group == "opening_prom_peaks")
+df_opening_prom$combinaison = factor(
+  df_opening_prom$combinaison, 
+  levels = c("combinaison7", "combinaison3", "combinaison1"))
+
+# Regroupement selon les dynamiques - STABLE # 
+#*********************************************#
+
+df_stable_prom = df %>% dplyr::filter(group == "stable_prom_peaks")
+
+
+```
+
+```{r Plot dynamiques peaks - Promoteurs}
+
+# Regroupement selon les dynamiques - TOUS LES POINTS # 
+#*****************************************************#
+
+plot_dyn_prom = plot_facet(tab = df_combi_ATAC_prom,
+  var_x = df_combi_ATAC_prom$time_value,
+  var_y = df_combi_ATAC_prom$mean_nbreads_log2,
+  var_group = df_combi_ATAC_prom$region,
+  var_colour = "#0072B2",
+  var_alpha = 0.2,
+  var_text = paste("n =", df_combi_ATAC_prom$nb_genes),
+  var_title = paste("Promoter peaks (all peaks, all dynamics) n =", nrow(df_combi_ATAC_prom)/4),
+  var_ylab = "log2(mean(reads) + 1)",
+  var_facet = combinaison~.,
+  var_tendency = df_combi_ATAC_prom$mean_tendency_log2,
+  var_mean = "red",
+  y_lim = c(0,12.5),
+  text_y = 10)
+
+plot_dyn_prom
+
+ggsave(plot_dyn_prom, 
+  filename = "/media/romuald/TOSHIBA EXT/Romuald_NGS/MARS-ATAC/exp/ATAC_peak_dynamics/plot_all_dynamics_promoter_log2.png",
+  dpi = 600)
+
+###
+
+plot_dyn_prom = plot_facet(tab = df_combi_ATAC_prom,
+  var_x = df_combi_ATAC_prom$time_value,
+  var_y = df_combi_ATAC_prom$mean_nbreads,
+  var_group = df_combi_ATAC_prom$region,
+  var_colour = "#0072B2",
+  var_alpha = 0.2,
+  var_text = paste("n =", df_combi_ATAC_prom$nb_genes),
+  var_title = paste("Promoter peaks (all peaks, all dynamics) n =", nrow(df_combi_ATAC_prom)/4),
+  var_ylab = "Number of reads detected",
+  var_facet = combinaison~.,
+  var_tendency = df_combi_ATAC_prom$mean_tendency,
+  var_mean = "red",
+  y_lim = c(0,1500),
+  text_y = 1400)
+
+plot_dyn_prom
+
+ggsave(plot_dyn_prom, 
+  filename = "/media/romuald/TOSHIBA EXT/Romuald_NGS/MARS-ATAC/exp/ATAC_peak_dynamics/plot_all_dynamics_promoter.png",
+  units = "in",
+  width = 8,
+  height = 6,
+  dpi = 600)
+
+
+# Regroupement selon les dynamiques - FERMETURE # 
+#***********************************************#
+
+plot_closing_prom  = plot_facet(tab = df_closing_prom,
+  var_x = df_closing_prom$time_value,
+  var_y = df_closing_prom$mean_nbreads_log2,
+  var_group = interaction(df_closing_prom$combinaison, df_closing_prom$region),
+  var_colour = "#0072B2",
+  var_alpha = 0.2,
+  var_text = paste("n =", df_closing_prom$nb_peak,"(",round((df_closing_prom$nb_peak/(nrow(df_combi_ATAC_prom)/4))*100,1),"%)"),
+  var_title = paste("Closing promoter peaks, n =", nrow(df_closing_prom)/4,
+    "\n",
+    "(",round((nrow(df_closing_prom)/4)/(nrow(df_combi_ATAC_prom)/4)*100,1),"% of total promoter peaks)"),
+  var_ylab = "log2(mean(reads) +1)",
+  var_facet = combinaison~.,
+  var_tendency = df_closing_prom$mean_tendency_log2,
+  var_mean = "red",
+  y_lim = c(0,12.5),
+  text_y = 10)
+
+plot_closing_prom
+
+ggsave(plot_closing_prom, 
+  filename = "/media/romuald/TOSHIBA EXT/Romuald_NGS/MARS-ATAC/exp/ATAC_peak_dynamics/plot_closing_promoter_log2.png",
+  dpi = 600)
+
+###
+
+plot_closing_prom  = plot_facet(tab = df_closing_prom,
+  var_x = df_closing_prom$time_value,
+  var_y = df_closing_prom$mean_nbreads,
+  var_group = interaction(df_closing_prom$combinaison, df_closing_prom$region),
+  var_colour = "#0072B2",
+  var_alpha = 0.2,
+  var_text = paste("n =", df_closing_prom$nb_peak,"(",round((df_closing_prom$nb_peak/(nrow(df_combi_ATAC_prom)/4))*100,1),"%)"),
+  var_title = paste("Closing promoter peaks, n =", nrow(df_closing_prom)/4,
+    "\n",
+    "(",round((nrow(df_closing_prom)/4)/(nrow(df_combi_ATAC_prom)/4)*100,1),"% of total promoter peaks)"),
+  var_ylab = "Number of reads detected",
+  var_facet = combinaison~.,
+  var_tendency = df_closing_prom$mean_tendency,
+  var_mean = "red",
+  y_lim = c(0,1500),
+  text_y = 1400)
+
+plot_closing_prom
+
+ggsave(plot_closing_prom, 
+  filename = "/media/romuald/TOSHIBA EXT/Romuald_NGS/MARS-ATAC/exp/ATAC_peak_dynamics/plot_closing_promoter.png",
+  dpi = 600)
+
+# Regroupement selon les dynamiques - OUVERTURE # 
+#***********************************************#
+
+plot_opening_prom  = plot_facet(tab = df_opening_prom,
+  var_x = df_opening_prom$time_value,
+  var_y = df_opening_prom$mean_nbreads_log2,
+  var_group = interaction(df_opening_prom$combinaison, df_opening_prom$region),
+  var_colour = "#0072B2",
+  var_alpha = 0.2,
+  var_text = paste("n =", df_opening_prom$nb_peak,"(",round((df_opening_prom$nb_peak/(nrow(df_combi_ATAC_prom)/4))*100,1),"%)"),
+  var_title = paste("Opening promoter peaks, n =", nrow(df_opening_prom)/4,
+    "\n",
+    "(",round((nrow(df_opening_prom)/4)/(nrow(df_combi_ATAC_prom)/4)*100,1),"% of total promoter peaks)"),
+  var_ylab = "log2(mean(reads) +1)",
+  var_facet = combinaison~.,
+  var_tendency = df_opening_prom$mean_tendency_log2,
+  var_mean = "red",
+  y_lim = c(0,12.5),
+  text_y = 10)
+
+plot_opening_prom
+
+ggsave(plot_opening_prom, 
+  filename = "/media/romuald/TOSHIBA EXT/Romuald_NGS/MARS-ATAC/exp/ATAC_peak_dynamics/plot_opening_promoter_log2.png",
+  dpi = 600)
+
+###
+
+plot_opening_prom  = plot_facet(tab = df_opening_prom,
+  var_x = df_opening_prom$time_value,
+  var_y = df_opening_prom$mean_nbreads,
+  var_group = interaction(df_opening_prom$combinaison, df_opening_prom$region),
+  var_colour = "#0072B2",
+  var_alpha = 0.2,
+  var_text = paste("n =", df_opening_prom$nb_peak,"(",round((df_opening_prom$nb_peak/(nrow(df_combi_ATAC_prom)/4))*100,1),"%)"),
+  var_title = paste("Opening promoter peaks, n =", nrow(df_opening_prom)/4,
+    "\n",
+    "(",round((nrow(df_opening_prom)/4)/(nrow(df_combi_ATAC_prom)/4)*100,1),"% of total promoter peaks)"),
+  var_ylab = "Number of reads detected",
+  var_facet = combinaison~.,
+  var_tendency = df_opening_prom$mean_tendency,
+  var_mean = "red",
+  y_lim = c(0,1500),
+  text_y = 1400)
+
+ggsave(plot_opening_prom, 
+  filename = "/media/romuald/TOSHIBA EXT/Romuald_NGS/MARS-ATAC/exp/ATAC_peak_dynamics/plot_opening_promoter.png",
+  dpi = 600)
+
+# Regroupement selon les dynamiques - STABLE # 
+#*********************************************#
+
+# log(mean-nb-reads +1) normalisation
+plot_stable_prom = plot_facet(tab = df_stable_prom,
+  var_x = df_stable_prom$time_value,
+  var_y = df_stable_prom$mean_nbreads_log2,
+  var_group = interaction(df_stable_prom$combinaison, df_stable_prom$region),
+  var_colour = "#0072B2",
+  var_alpha = 0.2,
+  var_text = "",
+  var_title = paste("Stable promoter peaks, n =", nrow(df_stable_prom)/4,
+    "\n",
+    "(",round((nrow(df_stable_prom)/4)/(nrow(df_combi_ATAC_prom)/4)*100,1),"% of total promoter peaks)"),
+  var_ylab = "log2(mean(reads) +1)",
+  var_facet = combinaison~.,
+  var_tendency = df_stable_prom$mean_tendency_log2,
+  var_mean = "red",
+  y_lim = c(0,12.5),
+  text_y = 10) 
+
+plot_stable_prom
+
+ggsave(plot_stable_prom, 
+  filename = "/media/romuald/TOSHIBA EXT/Romuald_NGS/MARS-ATAC/exp/ATAC_peak_dynamics/plot_stable_promoter_log2.png",
+  dpi = 600)
+
+###
+
+# Pas de normalisation (mean_nb_reads)
+plot_stable_prom  = plot_facet(tab = df_stable_prom,
+  var_x = df_stable_prom$time_value,
+  var_y = df_stable_prom$mean_nbreads,
+  var_group = interaction(df_stable_prom$combinaison, df_stable_prom$region),
+  var_text = "",
+  var_colour = "#0072B2",
+  var_alpha = 0.2,
+  # var_text = paste("n =", df_stable_prom$nb_peak,"(",round((df_stable_prom$nb_peak/(nrow(df_combi_ATAC_intergenic)/4))*100,1),"%)"),
+  var_title = paste("Stable promoter peaks, n =", nrow(df_stable_prom)/4,
+    "\n",
+    "(",round((nrow(df_stable_prom)/4)/(nrow(df_combi_ATAC_prom)/4)*100,1),"% of total promoter peaks)"),
+  var_ylab = "Number of read detected",
+  var_facet = combinaison~.,
+  var_tendency = df_stable_prom$mean_tendency,
+  var_mean = "red",
+  y_lim = c(0,1500),
+  text_y = 1400) 
+
+plot_stable_prom
+
+ggsave(plot_stable_prom, 
+  filename = "/media/romuald/TOSHIBA EXT/Romuald_NGS/MARS-ATAC/exp/ATAC_peak_dynamics/plot_stable_promoter.png",
+  dpi = 600)
+
+```
+
+      
+# 2: étude des peaks situés dans les régions intergéniques
+
+Il s'agit de suivre individuellement les peaks qui se trouvent dans les régions intergéniques dans le temps et de voir leur évolution. Rappelons que les régions intergéniques ont été définies ici comme les régions n'appartenant à aucun des éléments génomiques testés dans notre étude (Promoteur, Introns/Exon/5'UTR/3'UTR).\
+\
+Les peaks pouvant ne plus être détectés à un point donné dans le temps, plusieurs profils de dynamique peuvent émerger. Nous avons fait le choix de regrouper ces dynamiques dans plusieurs groupes différents : \
+\
+1 : le groupe des peaks dont la dynamique aboutit à une *fermeture*. C'est à dire que ces peaks peuvent être présents dès le début et s'être fermés par la suite, ou bien ils sont apparu de manière transitoire. Dans tous les cas, ces peaks sont absents à 48h.\
+\
+2 : le groupe des peaks dont la dynamique décrit une *ouverture*. C'est à dire qu'ils n'étaient pas présents à 0h, qu'ils ont ensuite apparu à un moment, et sont encore présents à 48h.\
+\
+3. le groupe de peaks avec une dynamique *stable*. Ces peaks sont présents dès le début et le reste jusqu'à la fin.\
+\
+(4.) Il reste un nombre très réduit (<5% des peaks totaux) pour lesquels la dynamique est peu interprétable du fait que ces derniers apparaissent et disparaissent de manère erratique". Ils ne sont pas représentés ici.\
+\
+*Précision* : la couleur correspond à celle utilisée dans les précédentes figures du papier MARS-ATAC : bleu pour les promoteurs, jaune pour les régions intergéniques. Les courbes en pointillés rouges représentent les tendances moyennes.
+
+```{r Création tableau travail - Intergénique}
+
+# ATAC - Création des granges annotés avec le nombre de reads par peaks (appel de fonction) #
+#*******************************************************************************************#
+peaks_reads_00h = peaks_reads_fun("peaks_00h_annotated.csv", "readcount_peaks_00h.csv")
+peaks_reads_05h = peaks_reads_fun("peaks_05h_annotated.csv", "readcount_peaks_05h.csv")
+peaks_reads_24h = peaks_reads_fun("peaks_24h_annotated.csv", "readcount_peaks_24h.csv")
+peaks_reads_48h = peaks_reads_fun("peaks_48h_annotated.csv", "readcount_peaks_48h.csv")
+
+
+### Etude des peaks tombant dans l'espace intergénique ###
+#********************************************************#
+
+# Filtre sur les Grange pour conserver seulement les peaks intergenic
+peaks_reads_00h_intergenic = peaks_reads_00h[which(peaks_reads_00h$Intergenic == TRUE)]
+peaks_reads_05h_intergenic = peaks_reads_05h[which(peaks_reads_05h$Intergenic == TRUE)]
+peaks_reads_24h_intergenic = peaks_reads_24h[which(peaks_reads_24h$Intergenic == TRUE)]
+peaks_reads_48h_intergenic = peaks_reads_48h[which(peaks_reads_48h$Intergenic == TRUE)]
+
+# Union des timings : permet de lister toutes les régions où il y a au moins un pic itergénique à un moment donné
+gr_list = GRangesList(peaks_reads_00h_intergenic, peaks_reads_05h_intergenic, peaks_reads_24h_intergenic, peaks_reads_48h_intergenic)
+gr_list_union = Reduce(x = gr_list, f = union)
+
+# Test de l'overlap des pics à chaque point de temps contre la liste générée avant.
+# S'il y a une intersection des pics entre les différents points de temps, alors celle-ci a été fusionnée lors de l'union
+# Il suffit alors de voir quels sont les pics qui ont participé à cette union, grâce à l'overlap des pics à chaque point de temps avec celle-ci
+
+overlap_00h_vs_union = findOverlaps(gr_list_union, peaks_reads_00h_intergenic)
+overlap_sum_up = tibble(queryHits = queryHits(overlap_00h_vs_union), ID_00h = subjectHits(overlap_00h_vs_union))
+
+overlap_05h_vs_union = findOverlaps(gr_list_union, peaks_reads_05h_intergenic)
+overlap_sum_up = full_join(overlap_sum_up, as.tibble(overlap_05h_vs_union), by = "queryHits") %>% rename(ID_05h = subjectHits)
+
+overlap_24h_vs_union = findOverlaps(gr_list_union, peaks_reads_24h_intergenic)
+overlap_sum_up = full_join(overlap_sum_up, as.tibble(overlap_24h_vs_union), by = "queryHits") %>% rename(ID_24h = subjectHits)
+
+overlap_48h_vs_union = findOverlaps(gr_list_union, peaks_reads_48h_intergenic)
+overlap_sum_up = full_join(overlap_sum_up, as.tibble(overlap_48h_vs_union), by = "queryHits") %>% rename(ID_48h = subjectHits)
+overlap_sum_up[is.na(overlap_sum_up)] <- 0
+
+# On remplace l'ID de chaque pic par sa valeur en nb de reads (boucle while car plus rapide ?)
+# Attention : la boucle met environ 10-15min à s'éxécuter
+
+df_ATAC_intergenic = NULL
+i = 1
+
+while(i < nrow(overlap_sum_up)){
+  
+  # print(paste(i,"/",nrow(overlap_sum_up)))
+  
+  time_00h = peaks_reads_00h_intergenic[as.integer(overlap_sum_up[i,"ID_00h"])]$mean_nbreads
+  if(length(time_00h) == 0){time_00h = 0}
+  
+  time_05h = peaks_reads_05h_intergenic[as.integer(overlap_sum_up[i,"ID_05h"])]$mean_nbreads
+  if(length(time_05h) == 0){time_05h = 0}
+  
+  time_24h = peaks_reads_24h_intergenic[as.integer(overlap_sum_up[i,"ID_24h"])]$mean_nbreads
+  if(length(time_24h) == 0){time_24h = 0}
+  
+  time_48h = peaks_reads_48h_intergenic[as.integer(overlap_sum_up[i,"ID_48h"])]$mean_nbreads
+  if(length(time_48h) == 0){time_48h = 0}
+  
+  df_ATAC_intergenic = rbind(df_ATAC_intergenic, data.frame(time_00h,time_05h,time_24h,time_48h))
+  
+  i = i +1
+  
+}
+
+# Enregistrement tableau intermédiaire pour ne pas avoir à relancer la boucle précédente
+# write_csv(x = df_ATAC_intergenic, file = "/home/romuald/Bureau/nb_reads_intergenic_peaks.csv")
+
+df_ATAC_intergenic = df_ATAC_intergenic %>% 
+  mutate(region = paste0("peak_",1:n())) %>% 
+  select(5,1,2,3,4)
+
+df_ATAC_intergenic_long = df_ATAC_intergenic %>% 
+  pivot_longer(
+    cols = c(time_00h,time_05h,time_24h,time_48h),
+    names_to = "time",
+    values_to = "mean_nbreads")
+
+df_ATAC_intergenic_long = df_ATAC_intergenic_long %>% 
+  mutate(
+    time = case_when(
+      time == "time_00h" ~ "00h",
+      time == "time_05h" ~ "05h",
+      time == "time_24h" ~ "24h",
+      time == "time_48h" ~ "48h"
+    )
+  )
+
+df_ATAC_intergenic_long = df_ATAC_intergenic_long %>%
+  dplyr::mutate(max_value_ratio = round(mean_nbreads/max(mean_nbreads)*100, 2)) %>%
+  dplyr::mutate(mean_nbreads_log2 = log2(mean_nbreads+1)) %>%
+  dplyr::mutate(exp = "ATAC_intergenic")
+
+
+##########################################################################  
+### Identification des dynamiques d'évolution en nbreads au cours du temps
+##########################################################################
+
+# Regroupement selon les dynamiques - TOUS LES POINTS # 
+#*****************************************************#
+
+df_combi_ATAC_intergenic = extract_combinaison(df = df_ATAC_intergenic_long, var_exp = "ATAC_intergenic")
+
+df = df_combi_ATAC_intergenic %>% 
+  dplyr:: mutate(group = case_when(combinaison %in% c("combinaison2", "combinaison4", "combinaison6", "combinaison8", "combinaison12", "combinaison14") ~ "closing_intergenic_peaks",
+    combinaison %in% c("combinaison1", "combinaison3", "combinaison7") ~ "opening_intergenic_peaks",
+    combinaison %in% c("combinaison15") ~ "stable_intergenic_peaks",
+    combinaison %in% c("combinaison5", "combinaison9", "combinaison10", "combinaison11", "combinaison13") ~ "group4"))
+
+
+
+# Regroupement selon les dynamiques - FERMETURE # 
+#***********************************************#
+
+df_closing_intergenic = df %>% dplyr::filter(group == "closing_intergenic_peaks")
+
+df_closing_intergenic$combinaison = factor(
+  x = df_closing_intergenic$combinaison, 
+  levels = c("combinaison8", "combinaison12", "combinaison14", "combinaison4", "combinaison6", "combinaison2"))
+
+# Regroupement selon les dynamiques - OUVERTURE # 
+#***********************************************#
+
+df_opening_intergenic = df %>% dplyr::filter(group == "opening_intergenic_peaks")
+df_opening_intergenic$combinaison = factor(
+  df_opening_intergenic$combinaison, 
+  levels = c("combinaison7", "combinaison3", "combinaison1"))
+
+# Regroupement selon les dynamiques - STABLE # 
+#*********************************************#
+
+df_stable_intergenic = df %>% dplyr::filter(group == "stable_intergenic_peaks")
+
+```
+
+```{r Plot dynamiques peaks - Intergénique}
+
+# # Regroupement selon les dynamiques - TOUS LES POINTS # 
+# #*****************************************************#
+
+plot_dyn_intergenic = plot_facet(tab = df_combi_ATAC_intergenic,
+  var_x = df_combi_ATAC_intergenic$time_value,
+  var_y = df_combi_ATAC_intergenic$mean_nbreads_log2,
+  var_group = df_combi_ATAC_intergenic$region,
+  var_colour = "#F0E442",
+  var_alpha = 0.2,
+  var_text = paste("n =", df_combi_ATAC_intergenic$nb_genes),
+  var_title = paste("intergenic peaks (all peaks, all dynamics) n =", nrow(df_combi_ATAC_intergenic)/4),
+  var_ylab = "log2(mean(reads) + 1)",
+  var_facet = combinaison~.,
+  var_tendency = df_combi_ATAC_intergenic$mean_tendency_log2,
+  var_mean = "red",
+  y_lim = c(0,12.5),
+  text_y = 10)
+
+plot_dyn_intergenic
+
+ggsave(plot_dyn_intergenic, 
+  filename = "/media/romuald/TOSHIBA EXT/Romuald_NGS/MARS-ATAC/exp/ATAC_peak_dynamics/plot_all_dynamics_intergenic_log2.png",
+  dpi = 600)
+
+###
+
+plot_dyn_intergenic = plot_facet(tab = tab,
+  var_x = tab$time_value,
+  var_y = tab$mean_nbreads,
+  var_group = tab$region,
+  var_colour = "#F0E442",
+  var_alpha = 0.2,
+  var_text = paste("n =", tab$nb_genes),
+  var_title = paste("intergenic peaks (all peaks, all dynamics) n =", nrow(df_combi_ATAC_intergenic)/4),
+  var_ylab = "Number of reads detected",
+  var_facet = combinaison~.,
+  var_tendency = tab$mean_tendency,
+  var_mean = "red",
+  y_lim = c(0,1500),
+  text_y = 250)
+
+plot_dyn_intergenic
+
+ggsave(plot_dyn_intergenic, 
+  filename = "/media/romuald/TOSHIBA EXT/Romuald_NGS/MARS-ATAC/exp/ATAC_peak_dynamics/plot_all_dynamics_intergenic.png",
+  units = "in",
+  width = 8,
+  height = 6,
+  dpi = 600)
+
+
+# Regroupement selon les dynamiques - FERMETURE # 
+#***********************************************#
+
+plot_closing_intergenic  = plot_facet(tab = df_closing_intergenic,
+  var_x = df_closing_intergenic$time_value,
+  var_y = df_closing_intergenic$mean_nbreads_log2,
+  var_group = interaction(df_closing_intergenic$combinaison, df_closing_intergenic$region),
+  var_colour = "#F0E442",
+  var_alpha = 0.2,
+  var_text = paste("n =", df_closing_intergenic$nb_peak,"(",round((df_closing_intergenic$nb_peak/(nrow(df_combi_ATAC_intergenic)/4))*100,1),"%)"),
+  var_title = paste("Closing intergenic peaks, n =", nrow(df_closing_intergenic)/4,
+    "\n",
+    "(",round((nrow(df_closing_intergenic)/4)/(nrow(df_combi_ATAC_intergenic)/4)*100,1),"% of total intergenic peaks)"),
+  var_ylab = "log2(mean(reads) +1)",
+  var_facet = combinaison~.,
+  var_tendency = df_closing_intergenic$mean_tendency_log2,
+  var_mean = "red",
+  y_lim = c(0,12.5),
+  text_y = 10)
+
+plot_closing_intergenic
+
+ggsave(plot_closing_intergenic, 
+  filename = "/media/romuald/TOSHIBA EXT/Romuald_NGS/MARS-ATAC/exp/ATAC_peak_dynamics/plot_closing_intergenic_log2.png",
+    dpi = 600)
+###
+
+plot_closing_intergenic  = plot_facet(tab = df_closing_intergenic,
+  var_x = df_closing_intergenic$time_value,
+  var_y = df_closing_intergenic$mean_nbreads,
+  var_group = interaction(df_closing_intergenic$combinaison, df_closing_intergenic$region),
+  var_colour = "#F0E442",
+  var_alpha = 0.2,
+  var_text = paste("n =", df_closing_intergenic$nb_peak,"(",round((df_closing_intergenic$nb_peak/(nrow(df_combi_ATAC_intergenic)/4))*100,1),"%)"),
+  var_title = paste("Closing intergenic peaks, n =", nrow(df_closing_intergenic)/4,
+    "\n",
+    "(",round((nrow(df_closing_intergenic)/4)/(nrow(df_combi_ATAC_intergenic)/4)*100,1),"% of total intergenic peaks)"),
+  var_ylab = "Number of reads detected",
+  var_facet = combinaison~.,
+  var_tendency = df_closing_intergenic$mean_tendency,
+  var_mean = "red",
+  y_lim = c(0,1500),
+  text_y = 1400)
+
+plot_closing_intergenic
+
+ggsave(plot_closing_intergenic, 
+  filename = "/media/romuald/TOSHIBA EXT/Romuald_NGS/MARS-ATAC/exp/ATAC_peak_dynamics/plot_closing_intergenic.png",
+  dpi = 600)
+
+# Regroupement selon les dynamiques - OUVERTURE # 
+#***********************************************#
+
+plot_opening_intergenic  = plot_facet(tab = df_opening_intergenic,
+  var_x = df_opening_intergenic$time_value,
+  var_y = df_opening_intergenic$mean_nbreads_log2,
+  var_group = interaction(df_opening_intergenic$combinaison, df_opening_intergenic$region),
+  var_colour = "#F0E442",
+  var_alpha = 0.2,
+  var_text = paste("n =", df_opening_intergenic$nb_peak,"(",round((df_opening_intergenic$nb_peak/(nrow(df_combi_ATAC_intergenic)/4))*100,1),"%)"),
+  var_title = paste("Opening intergenic peaks, n =", nrow(df_opening_intergenic)/4,
+    "\n",
+    "(",round((nrow(df_opening_intergenic)/4)/(nrow(df_combi_ATAC_intergenic)/4)*100,1),"% of total intergenic peaks)"),
+  var_ylab = "log2(mean(reads) +1)",
+  var_facet = combinaison~.,
+  var_tendency = df_opening_intergenic$mean_tendency_log2,
+  var_mean = "red",
+  y_lim = c(0,12.5),
+  text_y = 10)
+
+plot_opening_intergenic
+
+ggsave(plot_opening_intergenic, 
+  filename = "/media/romuald/TOSHIBA EXT/Romuald_NGS/MARS-ATAC/exp/ATAC_peak_dynamics/plot_opening_intergenic_log2.png",
+  dpi = 600)
+
+###
+
+plot_opening_intergenic  = plot_facet(tab = df_opening_intergenic,
+  var_x = df_opening_intergenic$time_value,
+  var_y = df_opening_intergenic$mean_nbreads,
+  var_group = interaction(df_opening_intergenic$combinaison, df_opening_intergenic$region),
+  var_colour = "#F0E442",
+  var_alpha = 0.2,
+  var_text = paste("n =", df_opening_intergenic$nb_peak,"(",round((df_opening_intergenic$nb_peak/(nrow(df_combi_ATAC_intergenic)/4))*100,1),"%)"),
+  var_title = paste("Opening intergenic peaks, n =", nrow(df_opening_intergenic)/4,
+    "\n",
+    "(",round((nrow(df_opening_intergenic)/4)/(nrow(df_combi_ATAC_intergenic)/4)*100,1),"% of total intergenic peaks)"),
+  var_ylab = "Number of reads detected",
+  var_facet = combinaison~.,
+  var_tendency = df_opening_intergenic$mean_tendency,
+  var_mean = "red",
+  y_lim = c(0,1500),
+  text_y = 1400)
+
+ggsave(plot_opening_intergenic, 
+  filename = "/media/romuald/TOSHIBA EXT/Romuald_NGS/MARS-ATAC/exp/ATAC_peak_dynamics/plot_opening_intergenic.png",
+  dpi = 600)
+
+# Regroupement selon les dynamiques - STABLE # 
+#*********************************************#
+
+# log(mean-nb-reads +1) normalisation
+plot_stable_intergenic= plot_facet(tab = df_stable_intergenic,
+  var_x = df_stable_intergenic$time_value,
+  var_y = df_stable_intergenic$mean_nbreads_log2,
+  var_group = interaction(df_stable_intergenic$combinaison, df_stable_intergenic$region),
+  var_colour = "#F0E442",
+  var_alpha = 0.2,
+  var_text = "",
+  var_title = paste("Stable intergenic peaks, n =", nrow(df_stable_intergenic)/4,
+    "\n",
+    "(",round((nrow(df_stable_intergenic)/4)/(nrow(df_combi_ATAC_intergenic)/4)*100,1),"% of total intergenic peaks)"),
+  var_ylab = "log2(mean(reads) +1)",
+  var_facet = combinaison~.,
+  var_tendency = df_stable_intergenic$mean_tendency_log2,
+  var_mean = "red",
+  y_lim = c(0,12.5),
+  text_y = 10) 
+
+plot_stable_intergenic
+
+ggsave(plot_stable_intergenic, 
+  filename = "/media/romuald/TOSHIBA EXT/Romuald_NGS/MARS-ATAC/exp/ATAC_peak_dynamics/plot_stable_intergenic_log2.png",
+  dpi = 600)
+
+###
+
+# Pas de normalisation (mean_nb_reads)
+plot_stable_intergenic  = plot_facet(tab = df_stable_intergenic,
+  var_x = df_stable_intergenic$time_value,
+  var_y = df_stable_intergenic$mean_nbreads,
+  var_group = interaction(df_stable_intergenic$combinaison, df_stable_intergenic$region),
+  var_text = "",
+  var_colour = "#F0E442",
+  var_alpha = 0.5,
+  # var_text = paste("n =", df_stable_intergenic$nb_peak,"(",round((df_stable_intergenic$nb_peak/(nrow(df_combi_ATAC_intergenic)/4))*100,1),"%)"),
+  var_title = paste("Stable intergenic peaks, n =", nrow(df_stable_intergenic)/4,
+    "\n",
+    "(",round((nrow(df_stable_intergenic)/4)/(nrow(df_combi_ATAC_intergenic)/4)*100,1),"% of total intergenic peaks)"),
+  var_ylab = "Number of read detected",
+  var_facet = combinaison~.,
+  var_tendency = df_stable_intergenic$mean_tendency,
+  var_mean = "red",
+  y_lim = c(0,1500),
+  text_y = 1400) 
+
+plot_stable_intergenic
+
+ggsave(plot_stable_intergenic, 
+  filename = "/media/romuald/TOSHIBA EXT/Romuald_NGS/MARS-ATAC/exp/ATAC_peak_dynamics/plot_stable_intergenic.png",
+  dpi = 600)
+
+```
+
+# Figures pour le Supplemental
+\
+Ces figures (Suppléments) sont identiques à celles réalisées précédemment à la différence qu'elles ne contiennet pas la dynamique "stable" puisque celle-ci est présentée dans les figures principales de l'article.
+
+```{r Figure Supp}
+
+###### Promoter
+### Enlever la combinaison "stable" pour le figure supp dans le papier
+tab = df_combi_ATAC_prom %>% filter(combinaison != "combinaison15")
+
+plot_dyn_prom = plot_facet(tab = tab,
+  var_x = tab$time_value,
+  var_y = tab$mean_nbreads,
+  var_group = tab$region,
+  var_colour = "#0072B2",
+  var_alpha = 0.2,
+  var_text = paste("n =", tab$nb_genes),
+  var_title = "",
+  var_ylab = "Number of reads detected",
+  var_facet = combinaison~.,
+  var_tendency = tab$mean_tendency,
+  var_mean = "red",
+  y_lim = c(0,1000),
+  text_y = 1400)
+
+plot_dyn_prom
+
+ggsave(plot_dyn_prom, 
+  filename = "/media/romuald/TOSHIBA EXT/Romuald_NGS/MARS-ATAC/exp/ATAC_peak_dynamics/plot_all_dynamics_promoter_Wo_stable.png",
+  units = "in",
+  width = 8,
+  height = 6,
+  dpi = 600)
+
+### With log2
+plot_dyn_prom = plot_facet(tab = tab,
+  var_x = tab$time_value,
+  var_y = tab$mean_nbreads_log2,
+  var_group = tab$region,
+  var_colour = "#0072B2",
+  var_alpha = 0.2,
+  var_text = paste("n =", tab$nb_genes),
+  var_title = "",
+  var_ylab = "Number of reads detected",
+  var_facet = combinaison~.,
+  var_tendency = tab$mean_tendency_log2,
+  var_mean = "red",
+  y_lim = c(0,12.5),
+  text_y = 10)
+
+plot_dyn_prom
+
+ggsave(plot_dyn_prom, 
+  filename = "/media/romuald/TOSHIBA EXT/Romuald_NGS/MARS-ATAC/exp/ATAC_peak_dynamics/plot_all_dynamics_promoter_Wo_stable_log2.png",
+  units = "in",
+  width = 8,
+  height = 6,
+  dpi = 600)
+
+
+###### Intergenic
+### Enlever la combinaison "stable" pour le figure supp dans le papier
+tab = df_combi_ATAC_intergenic %>% filter(combinaison != "combinaison15")
+
+plot_dyn_intergenic = plot_facet(tab = tab,
+  var_x = tab$time_value,
+  var_y = tab$mean_nbreads,
+  var_group = tab$region,
+  var_colour = "#F0E442",
+  var_alpha = 0.2,
+  var_text = paste("n =", tab$nb_genes),
+  var_title = "",
+  var_ylab = "Number of reads detected",
+  var_facet = combinaison~.,
+  var_tendency = tab$mean_tendency,
+  var_mean = "red",
+  y_lim = c(0,1000),
+  text_y = 250)
+
+plot_dyn_intergenic
+
+ggsave(plot_dyn_intergenic, 
+  filename = "/media/romuald/TOSHIBA EXT/Romuald_NGS/MARS-ATAC/exp/ATAC_peak_dynamics/plot_all_dynamics_intergenic_Wo_stable.png",
+  units = "in",
+  width = 8,
+  height = 6,
+  dpi = 600)
+
+### With log2
+plot_dyn_intergenic = plot_facet(tab = tab,
+  var_x = tab$time_value,
+  var_y = tab$mean_nbreads_log2,
+  var_group = tab$region,
+  var_colour = "#F0E442",
+  var_alpha = 0.2,
+  var_text = paste("n =", tab$nb_genes),
+  var_title = "",
+  var_ylab = "Number of reads detected",
+  var_facet = combinaison~.,
+  var_tendency = tab$mean_tendency_log2,
+  var_mean = "red",
+  y_lim = c(0,12.5),
+  text_y = 10)
+
+plot_dyn_intergenic
+
+ggsave(plot_dyn_intergenic, 
+  filename = "/media/romuald/TOSHIBA EXT/Romuald_NGS/MARS-ATAC/exp/ATAC_peak_dynamics/plot_all_dynamics_intergenic_Wo_stable_log2.png",
+  units = "in",
+  width = 8,
+  height = 6,
+  dpi = 600)
+
+
+```
+
+

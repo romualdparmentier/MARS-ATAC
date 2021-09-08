@@ -1,0 +1,5 @@
+# Ignore input data files
+data/
+
+# Ignore output data files
+exp/

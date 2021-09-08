@@ -1,0 +1,314 @@
+---
+title: "ATAC peaks annotation"
+author: "Romuald Parmentier"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+output: 
+  html_document :
+    df_print: kable
+    highlight: default
+    theme : journal
+    number_sections: yes
+    toc: yes
+    toc_float:
+      collapsed: no
+      smooth_scroll: yes
+    self_contained : yes
+---
+
+```{r Dependencies, hide = T}
+
+library(GenomicRanges)
+library(tidyverse)
+library(knitr)
+library(data.table)
+library(ggthemes)
+library(kableExtra)
+
+```
+
+```{r Function definition, hide = T}
+
+loadRData<-function(fileName){
+  #loads an RData file, and returns it
+  load(fileName)
+  get(ls()[ls()!="fileName"])
+  
+}
+
+```
+
+# Static peaks generation
+
+First, this script aims to generate conventional peaks resulting from the intersection of the peaks detected in the three donnors, each time seperatly. Starting from here, any operation was made after converting the peak in GRange (genomic ranges, R library) 
+
+```{r transform brodPeak file to GRange}
+
+peak_list = list.files(
+  path = "/media/romuald/TOSHIBA EXT/Romuald_NGS/MARS-ATAC/exp/ATAC_peak_calling/2021_01_01/", 
+  pattern = ".broadPeak",
+  full.names = T
+  )
+
+peaks_gr_list = list()
+
+for(i in 1:length(peak_list)){
+  
+  df_csv = read.table(file = peak_list[i], 
+    sep = "\t", 
+    header = F, 
+    stringsAsFactors = FALSE)
+  
+  # Correct format
+  df_csv = df_csv[,1:5]
+  colnames(df_csv) = c("Chr", "Start", "End", "peak_ID","width")
+
+  df_csv$Chr = as.factor(df_csv$Chr)
+  chromosomes_represented = levels(as.factor(df_csv$Chr))
+  
+  hg19_seqlengths = c("chr1"=249250621, "chr10"=135534747, "chr11"=135006516, "chr12"=133851895, "chr13"=115169878,
+                      "chr14"=107349540, "chr15"=102531392, "chr16"=90354753, "chr17"=81195210, "chr18"=78077248,
+                      "chr19"=59128983, "chr2"=243199373, "chr20"=63025520, "chr21"=48129895, "chr22"=51304566,
+                      "chr3"=198022430, "chr4"=191154276, "chr5"=180915260, "chr6"=171115067, "chr7"=159138663,
+                      "chr8"=146364022, "chr9"=141213431, "chrMT"=16571, "chrX"=155270560, "chrY"=59373566)
+  
+  hg19_seqlengths = hg19_seqlengths[names(hg19_seqlengths) %in% chromosomes_represented]
+  gr = GRanges(seqnames = df_csv$Chr,
+                ranges = IRanges(df_csv$Start, df_csv$End),
+                strand = "*")
+  
+  names(gr) = df_csv$peak_ID # add peak names to Grange (sample_peak_x)
+  genome(gr) = "hg19" # add genome information to the Grange
+  seqlengths(gr) = hg19_seqlengths # add chr length to each chr
+  
+  peaks_gr_list[[i]] = gr
+  names(peaks_gr_list)[i] = str_sub(peak_list[i],start = -13, end = -11) 
+
+}
+
+# print(names(peaks_gr_list))
+rm(df_csv, gr, chromosomes_represented, hg19_seqlengths, peak_list, i)
+
+```
+
+```{r Peaks GRange intersection (same time)}
+
+times = c("00h","05h","24h","48h")
+
+# Association between the name of the files (sequencing ID) and the condition (time and donor)
+label_correspondance =
+  read.delim("/media/romuald/TOSHIBA EXT/Romuald_NGS/MARS-ATAC/data/broadPeak_label_correspondance.csv") 
+
+kbl(label_correspondance) %>%
+  kable_styling(bootstrap_options = c("striped"), full_width = F, position = "left")
+
+peaks_gr_time_list = list()
+df_nb_peak = tibble()
+
+for(i in 1: length(times)){
+  
+  time = times[i]
+  labels = label_correspondance %>% filter(Time == time) %>% select(Label) %>% as_vector()
+  labels = as.vector.factor(labels)
+  
+  peaks_gr_list_intersect = peaks_gr_list[names(peaks_gr_list) %in% labels]
+  peaks_gr_time_intersection = Reduce(GenomicRanges::intersect, peaks_gr_list_intersect)
+  peaks_df_time_intersection = as_tibble(peaks_gr_time_intersection)
+  
+  peaks_gr_time_list[[i]] = peaks_gr_time_intersection
+  names(peaks_gr_time_list)[i] = paste0("peaks_",time,"_gr")
+  
+  df = tibble(time = time, nb_peaks_detected = nrow(peaks_df_time_intersection))
+  df_nb_peak = bind_rows(df_nb_peak, df)
+}
+
+kbl(df_nb_peak) %>%
+  kable_styling(bootstrap_options = c("striped"), full_width = F, position = "left")
+
+rm(label_correspondance, 
+  peaks_df_time_intersection, 
+  peaks_gr_time_intersection, 
+  peaks_gr_list_intersect, 
+  peaks_gr_list,
+  time, 
+  times, 
+  labels, 
+  i)
+  
+```
+
+
+# Genomic feature attribution
+\
+Secondly, this script aims to assign and represent where the peaks were attributed onto the genome according different genomic features ()
+\
+**Note : \
+**1.** The annotation reference file has been generated manualy. Introns, exons, 5'UTR, 3'UTR, CpG, CTCF and TSS +/-1kb were retrieved from UCSC genome browser (hg19) thanks to BiomRt (R library). FANTOME5 promoters regions were downloaded on the FANTOM5 website (hg19).\
+**2.** Intergenic regions were defined as the regions with no ohter annotations.\
+**3.** A peak can overlap different regions (ex : TSS + Exon), this is why the sum of the peaks between categorires may exceed the total sum of peaks detected at each time point.
+
+```{r GRange feature annotation}
+
+all_annotations = loadRData(
+  "/media/romuald/TOSHIBA EXT/Romuald_NGS/MARS-ATAC/data/Annotation_TSS_pm1kb_int_ex_53utr_ctcf_cpg_woThisto_FANTOM5_prom_gr.rda")
+annotations_types = levels(factor(all_annotations$annotation))
+
+times = c("00h","05h","24h","48h")
+
+peaks_gr_time_annotated_list = list()
+
+for(time in 1:length(times)){
+
+  # First a matrix is created filled with FALSE and added to the Grange
+  gr = peaks_gr_time_list[[time]]
+  metadata = matrix(FALSE, ncol = length(annotations_types), nrow = length(gr))
+  colnames(metadata) = annotations_types
+  mcols(gr) = metadata
+
+  # for each of the annotations types an overlap is calculated and used to assigned the peak as TRUE when overlapping with the annotation
+  for (i in 1:ncol(metadata)){
+    sub_annot = all_annotations[all_annotations$annotation == annotations_types[i]]
+    overlaps = findOverlaps(gr, sub_annot)
+    mcols(gr)[queryHits(overlaps),i] = TRUE
+  }
+  
+  colnames(mcols(gr)) = c("UTR3P","UTR5P","CpG", "CTCF","Exons","FANTOM5_promoter", "Introns","TSS_mp1kb")
+
+  mcols(gr) = as_tibble(mcols(gr)) %>%
+  dplyr::mutate(Intergenic = ifelse(UTR3P == FALSE & UTR5P == FALSE & Exons == FALSE & Introns == FALSE & TSS_mp1kb == FALSE & FANTOM5_promoter == FALSE, TRUE, FALSE)) %>%
+  dplyr::mutate(CpG_Intergenic = ifelse(Intergenic == TRUE & CpG == TRUE, TRUE, FALSE)) %>%
+  dplyr::mutate(CpG_Intergenic = ifelse(Intergenic == TRUE & CpG == TRUE, TRUE, FALSE)) %>%
+  dplyr::mutate(CTCF_Intergenic = ifelse(Intergenic == TRUE & CTCF == TRUE, TRUE, FALSE)) %>%
+  dplyr::mutate(CTCF_in_intron = ifelse(Introns == TRUE & CTCF == TRUE, TRUE, FALSE)) %>%
+  dplyr::mutate(CTCF_in_exon = ifelse(Exons == TRUE & CTCF == TRUE, TRUE, FALSE)) %>%
+  dplyr::mutate(time = times[time])
+  
+  peaks_gr_time_annotated_list[[time]] = gr
+  names(peaks_gr_time_annotated_list)[time] = paste0("peaks_",times[time],"_gr_annotated")
+  
+  # write.csv2(
+  #   x = gr,
+  #   file = paste0(
+  #     "/media/romuald/TOSHIBA EXT/Romuald_NGS/MARS-ATAC/exp/ATAC_peak_annotation/2021_01_01/peaks_",
+  #     times[time],
+  #     "_annotated.csv")
+  # )
+
+}
+
+# print(names(peaks_gr_time_annotated_list))
+
+rm(all_annotations,
+  gr,
+  metadata,
+  overlaps,
+  sub_annot,
+  annotations_types,
+  time,
+  i)
+
+```
+
+
+```{r Nb peak per time and per feature plot}
+
+df_fusion = rbindlist(lapply(peaks_gr_time_annotated_list, as_tibble))
+df_sum = df_fusion %>% group_by(time) %>% summarise(count = n())
+  
+plot <- ggplot(df_sum, aes(x = time, y = count)) +
+  geom_col(aes(fill = time), color = "black") +
+  scale_x_discrete(labels = c("0h","5h","24h","48h"))+
+  theme_tufte()+
+  theme(text = element_text(family = "arial"),
+    legend.position = "none", 
+    axis.line.y = element_line(colour = "black"),
+    axis.text.y = element_text(size = 11, colour = "black"),
+    axis.ticks.y = element_line() ,
+    axis.title.y = element_text(vjust = 2 ,size = 14),
+    axis.title.x = element_blank(),
+    axis.text.x = element_text(vjust = 4, size = 12, colour = "black"),
+    axis.ticks = element_blank())+
+    geom_text(aes(label = count), position = position_dodge(width = 0.8), vjust = -0.25)+
+    ylim(c(0,50000)) +
+    labs(y = "Number of peaks detected") +
+    scale_fill_viridis_d()
+
+plot
+
+ggsave(plot,filename = "/media/romuald/TOSHIBA EXT/Romuald_NGS/MARS-ATAC/exp/ATAC_peak_annotation/2021_01_01/plot_total_peaks.svg",
+  width = 150,
+  height = 150,
+  units = "mm")
+
+
+df_sum_feature = df_fusion %>% 
+  group_by(time) %>% 
+  summarise(across(c(6:18), sum))
+
+df_sum_feature = pivot_longer(data = df_sum_feature, 
+    cols = UTR3P:CTCF_in_exon, 
+    names_to = "feature")
+
+plot <- ggplot(df_sum_feature, aes(x = time, y = value)) +
+  geom_col(aes(fill = feature), color = "black") +
+  scale_x_discrete(labels = c("0h","5h","24h","48h"))+
+  facet_wrap(vars(feature), ncol = 4, strip.position = "bottom")+
+  theme_tufte()+
+  theme(legend.position = "none",
+    text = element_text(family = "arial"),
+    axis.line.y = element_line(colour = "black"),
+    axis.text.y = element_text(size = 11, colour = "black"),
+    axis.ticks.y = element_line() ,
+    axis.title.y = element_text(vjust = 2 ,size = 14),
+    axis.title.x = element_blank(),
+    axis.text.x = element_text(vjust = 1, size = 12, colour = "black"),
+    axis.ticks = element_blank(),
+    strip.placement = "outside",
+    strip.background = element_rect(colour = "transparent", fill = "transparent"),
+    strip.text.x = element_text(vjust = 2, size = 12, colour = "black"))+
+    geom_text(aes(label = value), position = position_dodge(width = 0.8), vjust = -0.25)+
+    ylim(c(0,30000)) +
+    labs(y = "Number of overlapping peaks") +
+    scale_fill_viridis_d()
+
+plot
+
+ggsave(plot,filename = "/media/romuald/TOSHIBA EXT/Romuald_NGS/MARS-ATAC/exp/ATAC_peak_annotation/2021_01_01/plot_feature_all.svg",
+  width = 200,
+  height = 200,
+  units = "mm")
+
+df_sum_feature_subset = df_sum_feature %>% filter(feature == "FANTOM5_promoter" | feature == "Exons" | feature == "Introns" | feature == "Intergenic")
+df_sum_feature_subset$feature = factor(x = df_sum_feature_subset$feature, levels = c("FANTOM5_promoter","Exons","Introns","Intergenic"))
+
+plot <- ggplot(df_sum_feature_subset, aes(x = time, y = value)) +
+  geom_col(aes(fill = feature), color = "black") +
+  scale_x_discrete(labels = c("0h","5h","24h","48h"))+
+  facet_wrap(vars(feature), ncol = 4, strip.position = "bottom")+
+  theme_tufte()+
+  theme(legend.position = "none", 
+    text = element_text(family = "arial"),
+    axis.line.y = element_line(colour = "black"),
+    axis.text.y = element_text(size = 11, colour = "black"),
+    axis.ticks.y = element_line() ,
+    axis.title.y = element_text(vjust = 2 ,size = 14),
+    axis.title.x = element_blank(),
+    axis.text.x = element_text(vjust = 1, size = 12, colour = "black"),
+    axis.ticks = element_blank(),
+    strip.placement = "outside",
+    strip.background = element_rect(colour = "transparent", fill = "transparent"),
+    strip.text.x = element_text(vjust = 2, size = 12, colour = "black"))+
+    geom_text(aes(label = value), size = 3.5, position = position_dodge(width = 0.8), vjust = -0.25)+
+    ylim(c(0,30000)) +
+    labs(y = "Number of peaks detected") +
+    scale_fill_viridis_d()
+
+plot
+
+ggsave(plot,filename = "/media/romuald/TOSHIBA EXT/Romuald_NGS/MARS-ATAC/exp/ATAC_peak_annotation/2021_01_01/plot_feature_subset.svg",
+  width = 200,
+  height = 120,
+  units = "mm")
+
+```
+
+
