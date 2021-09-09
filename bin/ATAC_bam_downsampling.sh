@@ -1,5 +1,5 @@
 #!/bin/bash
-cd /media/romuald/TOSHIBA\ EXT/Romuald_NGS/GEO_Rparmentier_submission_082020/ATACseq
+cd /media/romuald/TOSHIBA_EXT/Romuald_NGS/GEO_Rparmentier_submission_082020/ATACseq
 
 # Set the mininum of reads in all bam files
 
@@ -29,12 +29,16 @@ do
 
 done
 
-# Calculate the ratio for downsampling thanks to the mininum
+## Calculate the ratio for downsampling thanks to the mininum
+
+# First create an output folder named wih the date of day
+dt=$(date '+%d_%m_%Y_%Hh_%Mmin/');
+mkdir ~/Bureau/$dt
 
 for file in $(ls -t | grep _cut.bam)
 do
   name=$(basename -- $file | head -c 3) #Extract the sample sequencing code (3 first letter of thhe filename)
-  prefix="/media/romuald/TOSHIBA EXT/Romuald_NGS/MARS-ATAC/exp/ATAC_bam_downsampling/2021_01_01/"
+  prefix="/home/romuald/MARS-ATAC/exp/ATAC_bam_downsampling/"$dt #Path to store the outut in the previously created folder
   suffix="_cut_downsampled.bam"
   count=$(samtools view -c $file) #Count of the number of reads in the bam file
   echo "Downsampling value for $name = $min"
