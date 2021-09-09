@@ -1,5 +1,5 @@
 #!/bin/bash
-cd /media/romuald/TOSHIBA_EXT/Romuald_NGS/GEO_Rparmentier_submission_082020/ATACseq
+cd /home/romuaald/MARS-ATAC/data
 
 # Set the mininum of reads in all bam files
 
@@ -32,7 +32,7 @@ done
 ## Calculate the ratio for downsampling thanks to the mininum
 
 # First create an output folder named wih the date of day
-dt=$(date '+%d_%m_%Y_%Hh_%Mmin/');
+dt=$(date '+%Y_%m_%d_%Hh_%Mmin/');
 mkdir ~/Bureau/$dt
 
 for file in $(ls -t | grep _cut.bam)
