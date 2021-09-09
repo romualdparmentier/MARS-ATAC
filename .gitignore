@@ -1,5 +1,6 @@
 # Ignore input data files
-data/
+#data/
+#Note pour plus tard : ignorer les fichiers trop lourd si test en local
 
 # Ignore output data files
 exp/
