@@ -30,13 +30,26 @@ library(rlang) # pour utiliser case_when(!!!parse_exprs)
 
 ```
 
+```{r}
+
+pic_last_dir = function(parent_folder){
+  
+  dir = list.dirs(path = parent_folder, recursive = F)
+  dir = dir[length(dir)]
+
+    return(paste0(parent_folder,dir))
+}
+
+```
+
+
 ```{r Directories, message=FALSE, hide = T}
 
 # Direction de travail
 
-dir_data = "/media/romuald/TOSHIBA EXT/Romuald_NGS/MARS-ATAC/data/"
-dir_data_peaks = "/media/romuald/TOSHIBA EXT/Romuald_NGS/MARS-ATAC/exp/ATAC_peak_annotation/2021_01_01/"
-dir_data_readscount = "/media/romuald/TOSHIBA EXT/Romuald_NGS/MARS-ATAC/exp/ATAC_peak_readcount/2021_01_01/"
+dir_data = "/home/romuald/MARS-ATAC/data/"
+dir_data_peaks = pic_last_dir(parent_folder = "/home/romuald/MARS-ATAC/exp/ATAC_peak_annotation/"
+dir_data_readscount = "/home/romuald/MARS-ATAC/exp/ATAC_peak_readcount/2021_01_01/"
 
 ```
 
@@ -342,7 +355,7 @@ plot_dyn_prom = plot_facet(tab = df_combi_ATAC_prom,
 plot_dyn_prom
 
 ggsave(plot_dyn_prom, 
-  filename = "/media/romuald/TOSHIBA EXT/Romuald_NGS/MARS-ATAC/exp/ATAC_peak_dynamics/plot_all_dynamics_promoter_log2.png",
+  filename = "/home/romuald/MARS-ATAC/exp/ATAC_peak_dynamics/plot_all_dynamics_promoter_log2.png",
   dpi = 600)
 
 ###
@@ -365,7 +378,7 @@ plot_dyn_prom = plot_facet(tab = df_combi_ATAC_prom,
 plot_dyn_prom
 
 ggsave(plot_dyn_prom, 
-  filename = "/media/romuald/TOSHIBA EXT/Romuald_NGS/MARS-ATAC/exp/ATAC_peak_dynamics/plot_all_dynamics_promoter.png",
+  filename = "/home/romuald/MARS-ATAC/exp/ATAC_peak_dynamics/plot_all_dynamics_promoter.png",
   units = "in",
   width = 8,
   height = 6,
@@ -395,7 +408,7 @@ plot_closing_prom  = plot_facet(tab = df_closing_prom,
 plot_closing_prom
 
 ggsave(plot_closing_prom, 
-  filename = "/media/romuald/TOSHIBA EXT/Romuald_NGS/MARS-ATAC/exp/ATAC_peak_dynamics/plot_closing_promoter_log2.png",
+  filename = "/home/romuald/MARS-ATAC/exp/ATAC_peak_dynamics/plot_closing_promoter_log2.png",
   dpi = 600)
 
 ###
@@ -420,7 +433,7 @@ plot_closing_prom  = plot_facet(tab = df_closing_prom,
 plot_closing_prom
 
 ggsave(plot_closing_prom, 
-  filename = "/media/romuald/TOSHIBA EXT/Romuald_NGS/MARS-ATAC/exp/ATAC_peak_dynamics/plot_closing_promoter.png",
+  filename = "/home/romuald/MARS-ATAC/exp/ATAC_peak_dynamics/plot_closing_promoter.png",
   dpi = 600)
 
 # Regroupement selon les dynamiques - OUVERTURE # 
@@ -446,7 +459,7 @@ plot_opening_prom  = plot_facet(tab = df_opening_prom,
 plot_opening_prom
 
 ggsave(plot_opening_prom, 
-  filename = "/media/romuald/TOSHIBA EXT/Romuald_NGS/MARS-ATAC/exp/ATAC_peak_dynamics/plot_opening_promoter_log2.png",
+  filename = "/home/romuald/MARS-ATAC/exp/ATAC_peak_dynamics/plot_opening_promoter_log2.png",
   dpi = 600)
 
 ###
@@ -469,7 +482,7 @@ plot_opening_prom  = plot_facet(tab = df_opening_prom,
   text_y = 1400)
 
 ggsave(plot_opening_prom, 
-  filename = "/media/romuald/TOSHIBA EXT/Romuald_NGS/MARS-ATAC/exp/ATAC_peak_dynamics/plot_opening_promoter.png",
+  filename = "/home/romuald/MARS-ATAC/exp/ATAC_peak_dynamics/plot_opening_promoter.png",
   dpi = 600)
 
 # Regroupement selon les dynamiques - STABLE # 
@@ -496,7 +509,7 @@ plot_stable_prom = plot_facet(tab = df_stable_prom,
 plot_stable_prom
 
 ggsave(plot_stable_prom, 
-  filename = "/media/romuald/TOSHIBA EXT/Romuald_NGS/MARS-ATAC/exp/ATAC_peak_dynamics/plot_stable_promoter_log2.png",
+  filename = "/home/romuald/MARS-ATAC/exp/ATAC_peak_dynamics/plot_stable_promoter_log2.png",
   dpi = 600)
 
 ###
@@ -523,7 +536,7 @@ plot_stable_prom  = plot_facet(tab = df_stable_prom,
 plot_stable_prom
 
 ggsave(plot_stable_prom, 
-  filename = "/media/romuald/TOSHIBA EXT/Romuald_NGS/MARS-ATAC/exp/ATAC_peak_dynamics/plot_stable_promoter.png",
+  filename = "/home/romuald/MARS-ATAC/exp/ATAC_peak_dynamics/plot_stable_promoter.png",
   dpi = 600)
 
 ```
@@ -706,7 +719,7 @@ plot_dyn_intergenic = plot_facet(tab = df_combi_ATAC_intergenic,
 plot_dyn_intergenic
 
 ggsave(plot_dyn_intergenic, 
-  filename = "/media/romuald/TOSHIBA EXT/Romuald_NGS/MARS-ATAC/exp/ATAC_peak_dynamics/plot_all_dynamics_intergenic_log2.png",
+  filename = "/home/romuald/MARS-ATAC/exp/ATAC_peak_dynamics/plot_all_dynamics_intergenic_log2.png",
   dpi = 600)
 
 ###
@@ -729,7 +742,7 @@ plot_dyn_intergenic = plot_facet(tab = tab,
 plot_dyn_intergenic
 
 ggsave(plot_dyn_intergenic, 
-  filename = "/media/romuald/TOSHIBA EXT/Romuald_NGS/MARS-ATAC/exp/ATAC_peak_dynamics/plot_all_dynamics_intergenic.png",
+  filename = "/home/romuald/MARS-ATAC/exp/ATAC_peak_dynamics/plot_all_dynamics_intergenic.png",
   units = "in",
   width = 8,
   height = 6,
@@ -759,7 +772,7 @@ plot_closing_intergenic  = plot_facet(tab = df_closing_intergenic,
 plot_closing_intergenic
 
 ggsave(plot_closing_intergenic, 
-  filename = "/media/romuald/TOSHIBA EXT/Romuald_NGS/MARS-ATAC/exp/ATAC_peak_dynamics/plot_closing_intergenic_log2.png",
+  filename = "/home/romuald/MARS-ATAC/exp/ATAC_peak_dynamics/plot_closing_intergenic_log2.png",
     dpi = 600)
 ###
 
@@ -783,7 +796,7 @@ plot_closing_intergenic  = plot_facet(tab = df_closing_intergenic,
 plot_closing_intergenic
 
 ggsave(plot_closing_intergenic, 
-  filename = "/media/romuald/TOSHIBA EXT/Romuald_NGS/MARS-ATAC/exp/ATAC_peak_dynamics/plot_closing_intergenic.png",
+  filename = "/home/romuald/MARS-ATAC/exp/ATAC_peak_dynamics/plot_closing_intergenic.png",
   dpi = 600)
 
 # Regroupement selon les dynamiques - OUVERTURE # 
@@ -809,7 +822,7 @@ plot_opening_intergenic  = plot_facet(tab = df_opening_intergenic,
 plot_opening_intergenic
 
 ggsave(plot_opening_intergenic, 
-  filename = "/media/romuald/TOSHIBA EXT/Romuald_NGS/MARS-ATAC/exp/ATAC_peak_dynamics/plot_opening_intergenic_log2.png",
+  filename = "/home/romuald/MARS-ATAC/exp/ATAC_peak_dynamics/plot_opening_intergenic_log2.png",
   dpi = 600)
 
 ###
@@ -832,7 +845,7 @@ plot_opening_intergenic  = plot_facet(tab = df_opening_intergenic,
   text_y = 1400)
 
 ggsave(plot_opening_intergenic, 
-  filename = "/media/romuald/TOSHIBA EXT/Romuald_NGS/MARS-ATAC/exp/ATAC_peak_dynamics/plot_opening_intergenic.png",
+  filename = "/home/romuald/MARS-ATAC/exp/ATAC_peak_dynamics/plot_opening_intergenic.png",
   dpi = 600)
 
 # Regroupement selon les dynamiques - STABLE # 
@@ -859,7 +872,7 @@ plot_stable_intergenic= plot_facet(tab = df_stable_intergenic,
 plot_stable_intergenic
 
 ggsave(plot_stable_intergenic, 
-  filename = "/media/romuald/TOSHIBA EXT/Romuald_NGS/MARS-ATAC/exp/ATAC_peak_dynamics/plot_stable_intergenic_log2.png",
+  filename = "/home/romuald/MARS-ATAC/exp/ATAC_peak_dynamics/plot_stable_intergenic_log2.png",
   dpi = 600)
 
 ###
@@ -886,7 +899,7 @@ plot_stable_intergenic  = plot_facet(tab = df_stable_intergenic,
 plot_stable_intergenic
 
 ggsave(plot_stable_intergenic, 
-  filename = "/media/romuald/TOSHIBA EXT/Romuald_NGS/MARS-ATAC/exp/ATAC_peak_dynamics/plot_stable_intergenic.png",
+  filename = "/home/romuald/MARS-ATAC/exp/ATAC_peak_dynamics/plot_stable_intergenic.png",
   dpi = 600)
 
 ```
@@ -919,7 +932,7 @@ plot_dyn_prom = plot_facet(tab = tab,
 plot_dyn_prom
 
 ggsave(plot_dyn_prom, 
-  filename = "/media/romuald/TOSHIBA EXT/Romuald_NGS/MARS-ATAC/exp/ATAC_peak_dynamics/plot_all_dynamics_promoter_Wo_stable.png",
+  filename = "/home/romuald/MARS-ATAC/exp/ATAC_peak_dynamics/plot_all_dynamics_promoter_Wo_stable.png",
   units = "in",
   width = 8,
   height = 6,
@@ -944,7 +957,7 @@ plot_dyn_prom = plot_facet(tab = tab,
 plot_dyn_prom
 
 ggsave(plot_dyn_prom, 
-  filename = "/media/romuald/TOSHIBA EXT/Romuald_NGS/MARS-ATAC/exp/ATAC_peak_dynamics/plot_all_dynamics_promoter_Wo_stable_log2.png",
+  filename = "/home/romuald/MARS-ATAC/exp/ATAC_peak_dynamics/plot_all_dynamics_promoter_Wo_stable_log2.png",
   units = "in",
   width = 8,
   height = 6,
@@ -973,7 +986,7 @@ plot_dyn_intergenic = plot_facet(tab = tab,
 plot_dyn_intergenic
 
 ggsave(plot_dyn_intergenic, 
-  filename = "/media/romuald/TOSHIBA EXT/Romuald_NGS/MARS-ATAC/exp/ATAC_peak_dynamics/plot_all_dynamics_intergenic_Wo_stable.png",
+  filename = "/home/romuald/MARS-ATAC/exp/ATAC_peak_dynamics/plot_all_dynamics_intergenic_Wo_stable.png",
   units = "in",
   width = 8,
   height = 6,
@@ -998,7 +1011,7 @@ plot_dyn_intergenic = plot_facet(tab = tab,
 plot_dyn_intergenic
 
 ggsave(plot_dyn_intergenic, 
-  filename = "/media/romuald/TOSHIBA EXT/Romuald_NGS/MARS-ATAC/exp/ATAC_peak_dynamics/plot_all_dynamics_intergenic_Wo_stable_log2.png",
+  filename = "/home/romuald/MARS-ATAC/exp/ATAC_peak_dynamics/plot_all_dynamics_intergenic_Wo_stable_log2.png",
   units = "in",
   width = 8,
   height = 6,
