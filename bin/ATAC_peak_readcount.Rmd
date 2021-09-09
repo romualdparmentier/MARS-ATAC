@@ -75,6 +75,10 @@ bam_files = pic_last_files("/home/romuald/MARS-ATAC/exp/ATAC_bam_downsampling",
 
 times = c("00h", "05h", "24h", "48h")
 
+#Create a unique folder for output with th date of the day
+output_dir = format(Sys.time(), "%Y_%m_%d_%Hh_%Mmin")
+dir.create(path = paste0("/home/romuald/MARS-ATAC/exp/ATAC_peaks_readcount/", output_dir))
+
 for(i in 1:length(times)){
   
   # Define peaks (region) where to count reads, according time
@@ -102,10 +106,6 @@ for(i in 1:length(times)){
   
   matrix_count = readCount$counts
 
-  #Create a unique folder for output with th date of the day
-  output_dir = format(Sys.time(), "%Y_%m_%d_%Hh_%Mmin")
-  dir.create(path = paste0("/home/romuald/MARS-ATAC/exp/ATAC_peaks_readcount/", output_dir))
-  
   write.csv2(
     x = matrix_count, 
     file = paste0("/media/romuald/TOSHIBA EXT/Romuald_NGS/MARS-ATAC/exp/ATAC_peaks_readcount/",
