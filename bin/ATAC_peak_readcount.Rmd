@@ -35,6 +35,24 @@ library(kableExtra)
 
 ```
 
+```{r}
+
+pic_last_files = function(parent_folder, pattern){
+  
+  dir = list.dirs(path = parent_folder, recursive = F)
+  dir = dir[length(dir)]
+
+  files = list.files(
+    path = dir,
+    pattern = pattern,
+    full.names = T)
+  
+  return(files)
+  
+}
+
+```
+
 # Readcount on donors intersection at fixed time points
 
 This first part aims to calculate the number of reads associated to the peaks corresponding to a 00h, 05h, 24h or 48h (theses peaks were determined as the intersection region of the three donors at a fixed time point, see "ATAC_peak_annotation" script).\
@@ -46,17 +64,13 @@ The output corresponds to a matrix where each line represents a peak, and each o
 ```{r readcount on donors intersection at fixed time points}
 
 label_correspondance =
-  read.delim("/media/romuald/TOSHIBA EXT/Romuald_NGS/MARS-ATAC/data/broadPeak_label_correspondance.csv")  
+  read.delim("/home/romuald/MARS-ATAC/data/broadPeak_label_correspondance.csv")  
 
-peaks_files = list.files(
-  path = "/media/romuald/TOSHIBA EXT/Romuald_NGS/MARS-ATAC/exp/ATAC_peak_annotation/2021_01_01/",
-  pattern = "csv",
-  full.names = T)
+peaks_files = pic_last_files(parent_folder = "/home/romuald/MARS-ATAC/exp/ATAC_peak_annotation",
+  pattern = "csv")
 
-bam_files = list.files("/media/romuald/TOSHIBA EXT/Romuald_NGS/MARS-ATAC/exp/ATAC_bam_downsampling/2021_01_01/",
-  pattern = "bam",
-  full.names = T
-  )
+bam_files = pic_last_files("/home/romuald/MARS-ATAC/exp/ATAC_bam_downsampling",
+  pattern = "bam")
 
 times = c("00h", "05h", "24h", "48h")
 
@@ -86,10 +100,16 @@ for(i in 1:length(times)){
                            countMultiMappingReads = TRUE)
   
   matrix_count = readCount$counts
+
+  #Create a unique folder for output with th date of the day
+  output_dir = format(Sys.time(), "%Y_%m_%d_%Hh_%Mmin")
+  dir.create(path = paste0("/home/romuald/MARS-ATAC/exp/ATAC_peaks_readcount/", output_dir))
   
   write.csv2(
     x = matrix_count, 
-    file = paste0("/media/romuald/TOSHIBA EXT/Romuald_NGS/MARS-ATAC/exp/ATAC_peaks_readcount/2021_01_01/readcount_peaks_", 
+    file = paste0("/media/romuald/TOSHIBA EXT/Romuald_NGS/MARS-ATAC/exp/ATAC_peaks_readcount/",
+      output_dir,
+      "/readcount_peaks_", 
       times[i], 
       ".csv"))
   
