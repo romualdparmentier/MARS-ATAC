@@ -35,10 +35,11 @@ library(kableExtra)
 
 ```
 
-```{r}
+```{r retreive last files crated in the exp}
 
 pic_last_files = function(parent_folder, pattern){
   
+  # List dir and get the last created, corresponding to the up-to-date data generated
   dir = list.dirs(path = parent_folder, recursive = F)
   dir = dir[length(dir)]
 
