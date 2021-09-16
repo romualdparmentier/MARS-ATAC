@@ -30,11 +30,23 @@ library(GenomicRanges)
 
 ```{r Function definition, hide = T}
 
+# Fonction pour charger un fichier .rda en le renommant
+
 loadRData <- function(fileName){
   #loads an RData file, and returns it
   load(fileName)
   get(ls()[ls()!="fileName"])
   
+}
+
+# Fonction pour se placer dans le dernier dossier créé, afin de ranger les résultats générés
+
+pic_last_dir = function(parent_folder){
+  
+  dir = list.dirs(path = parent_folder, recursive = F, full.names = F)
+  dir = dir[length(dir)]
+
+    return(paste0(parent_folder,dir))
 }
 
 ```
@@ -52,14 +64,15 @@ The output corresponds to a matrix where each line represents a region (resultin
 ```{r readcount on time interval union}
 
 label_correspondance =
-  read.delim("/media/romuald/TOSHIBA EXT/Romuald_NGS/MARS-ATAC/data/broadPeak_label_correspondance.csv")  
+  read.delim("/home/romuald/MARS-ATAC/data/broadPeak_label_correspondance.csv")  
 
 peaks_files = list.files(
-  path = "/media/romuald/TOSHIBA EXT/Romuald_NGS/MARS-ATAC/exp/ATAC_peak_annotation/2021_01_01/",
+  path = pic_last_dir(parent_folder = "/home/romuald/MARS-ATAC/exp/ATAC_peak_annotation/"),
   pattern = "csv",
   full.names = T)
 
-bam_files = list.files("/media/romuald/TOSHIBA EXT/Romuald_NGS/MARS-ATAC/exp/ATAC_bam_downsampling/2021_01_01/",
+bam_files = list.files(
+  path = pic_last_dir(parent_folder = "/home/romuald/MARS-ATAC/exp/ATAC_bam_downsampling/"),
   pattern = "bam",
   full.names = T
   )
@@ -67,6 +80,10 @@ bam_files = list.files("/media/romuald/TOSHIBA EXT/Romuald_NGS/MARS-ATAC/exp/ATA
 union_region_list = list() 
 
 times = c("00h", "05h", "24h", "48h")
+
+#Create a unique folder for output with th date of the day
+output_dir = format(Sys.time(), "%Y_%m_%d_%Hh_%Mmin")
+dir.create(path = paste0("/home/romuald/MARS-ATAC/exp/ATAC_differential_accessibility/", output_dir))
 
 for(i in 1:(length(times)-1)){
   
@@ -167,7 +184,7 @@ for(i in 1:(length(times)-1)){
   
   write.csv2(
     x = matrix_count, 
-    file = paste0("/media/romuald/TOSHIBA EXT/Romuald_NGS/MARS-ATAC/exp/ATAC_differential_accessibility/2021_01_01/readcount_peaks_union_", 
+    file = paste0("/home/romuald/MARS-ATAC/exp/ATAC_differential_accessibility/", output_dir,"/readcount_peaks_union_", 
       times[i],
       "_",
       times[i+1],
@@ -190,7 +207,7 @@ The second part of this script uses DEseq2 to calculate the foldchange and the p
 ```{r DEseq2 on readcount matrix (interval union)}
 
 matrix_readcount_union_files = list.files(
-  path = "/media/romuald/TOSHIBA EXT/Romuald_NGS/MARS-ATAC/exp/ATAC_differential_accessibility/2021_01_01/",
+  path = pic_last_dir(parent_folder = "/home/romuald/MARS-ATAC/exp/ATAC_differential_accessibility/"),
   pattern = "union",
   full.names = T)
 
@@ -240,7 +257,7 @@ Each of the regions are then associated to a genomic feature to be ploted latter
 # 1 Annotate the region resulting from the union of peaks at two consecutive times
 
 all_annotations = loadRData(
-  "/media/romuald/TOSHIBA EXT/Romuald_NGS/MARS-ATAC/data/Annotation_TSS_pm1kb_int_ex_53utr_ctcf_cpg_woThisto_FANTOM5_prom_gr.rda")
+  "/home/romuald/MARS-ATAC/data/Annotation_TSS_pm1kb_int_ex_53utr_ctcf_cpg_woThisto_FANTOM5_prom_gr.rda")
 
 annotations_types = levels(factor(all_annotations$annotation))
 
@@ -306,7 +323,7 @@ for(i in 1:(length(times)-1)){
   write.csv2(
     x = DEseq_results_annotated,
     file = paste0(
-      "/media/romuald/TOSHIBA EXT/Romuald_NGS/MARS-ATAC/exp/ATAC_differential_accessibility/2021_01_01/DEseq_results_",
+      "/home/romuald/MARS-ATAC/exp/ATAC_differential_accessibility/",output_dir,"/DEseq_results_",
       times[i],"_",times[i+1],"_annotated.csv"))
 }
 
@@ -320,7 +337,7 @@ Only the regions corresponding to promoters and intergenic regions are represent
 ```{r Volcano plot}
 
 DEseq_files = list.files(
-  path = "/media/romuald/TOSHIBA EXT/Romuald_NGS/MARS-ATAC/exp/ATAC_differential_accessibility/2021_01_01/",
+  path = pic_last_dir("/home/romuald/MARS-ATAC/exp/ATAC_differential_accessibility/"),
   pattern = "DEseq",
   full.names = T)
 
@@ -371,7 +388,10 @@ for(i in 1:length(time_interval)){
   
   ggsave(
     plot = plot,
-    filename =  paste0("/media/romuald/TOSHIBA EXT/Romuald_NGS/MARS-ATAC/exp/ATAC_differential_accessibility/2021_01_01/plot_volcano_promoter_intergenic_", time_interval[i],".png"))
+    filename =  paste0(
+      "/home/romuald/MARS-ATAC/exp/ATAC_differential_accessibility/",
+      ouput_dir,"/plot_volcano_promoter_intergenic_",
+      time_interval[i],".png"))
   
   df_summarize = df_plot %>% 
     filter(feature == "FANTOM5_promoter" | feature == "Intergenic") %>% 
