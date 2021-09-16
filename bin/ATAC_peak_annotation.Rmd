@@ -35,6 +35,19 @@ loadRData<-function(fileName){
   
 }
 
+pic_last_files = function(parent_folder, pattern){
+  
+  dir = list.dirs(path = parent_folder, recursive = F)
+  dir = dir[length(dir)]
+
+  files = list.files(
+    path = dir,
+    pattern = pattern,
+    full.names = T)
+  
+  return(files)
+}
+
 ```
 
 # Static peaks generation
@@ -43,11 +56,8 @@ First, this script aims to generate conventional peaks resulting from the inters
 
 ```{r transform brodPeak file to GRange}
 
-peak_list = list.files(
-  path = "/media/romuald/TOSHIBA EXT/Romuald_NGS/MARS-ATAC/exp/ATAC_peak_calling/2021_01_01/", 
-  pattern = ".broadPeak",
-  full.names = T
-  )
+peak_list = pic_last_files(parent_folder = "/home/romuald/MARS-ATAC/exp/ATAC_peak_calling", 
+  pattern = ".broadPeak")
 
 peaks_gr_list = list()
 
@@ -96,7 +106,7 @@ times = c("00h","05h","24h","48h")
 
 # Association between the name of the files (sequencing ID) and the condition (time and donor)
 label_correspondance =
-  read.delim("/media/romuald/TOSHIBA EXT/Romuald_NGS/MARS-ATAC/data/broadPeak_label_correspondance.csv") 
+  read.delim("/home/romuald/MARS-ATAC/data/broadPeak_label_correspondance.csv") 
 
 kbl(label_correspondance) %>%
   kable_styling(bootstrap_options = c("striped"), full_width = F, position = "left")
@@ -149,12 +159,17 @@ Secondly, this script aims to assign and represent where the peaks were attribut
 ```{r GRange feature annotation}
 
 all_annotations = loadRData(
-  "/media/romuald/TOSHIBA EXT/Romuald_NGS/MARS-ATAC/data/Annotation_TSS_pm1kb_int_ex_53utr_ctcf_cpg_woThisto_FANTOM5_prom_gr.rda")
+  "/home/romuald/MARS-ATAC/data/Annotation_TSS_pm1kb_int_ex_53utr_ctcf_cpg_woThisto_FANTOM5_prom_gr.rda")
+
 annotations_types = levels(factor(all_annotations$annotation))
 
 times = c("00h","05h","24h","48h")
 
 peaks_gr_time_annotated_list = list()
+
+# Create a unique folder for output corresponding to the date of the day
+output_dir = format(Sys.time(), "%Y_%m_%d_%Hh_%Mmin")
+dir.create(path = paste0("/home/romuald/MARS-ATAC/exp/ATAC_peak_annotation/", output_dir))
 
 for(time in 1:length(times)){
 
@@ -185,13 +200,15 @@ for(time in 1:length(times)){
   peaks_gr_time_annotated_list[[time]] = gr
   names(peaks_gr_time_annotated_list)[time] = paste0("peaks_",times[time],"_gr_annotated")
   
-  # write.csv2(
-  #   x = gr,
-  #   file = paste0(
-  #     "/media/romuald/TOSHIBA EXT/Romuald_NGS/MARS-ATAC/exp/ATAC_peak_annotation/2021_01_01/peaks_",
-  #     times[time],
-  #     "_annotated.csv")
-  # )
+   write.csv2(
+     x = gr,
+     file = paste0(
+       "/home/romuald/MARS-ATAC/exp/ATAC_peak_annotation/",
+       output_dir,
+       "peaks_",
+       times[time],
+       "_annotated.csv")
+   )
 
 }
 
@@ -234,7 +251,8 @@ plot <- ggplot(df_sum, aes(x = time, y = count)) +
 
 plot
 
-ggsave(plot,filename = "/media/romuald/TOSHIBA EXT/Romuald_NGS/MARS-ATAC/exp/ATAC_peak_annotation/2021_01_01/plot_total_peaks.svg",
+ggsave(plot,
+  filename = paste0("/home/romuald/MARS-ATAC/exp/ATAC_peak_annotation/", output_dir,"/plot_total_peaks.svg"),
   width = 150,
   height = 150,
   units = "mm")
@@ -272,7 +290,7 @@ plot <- ggplot(df_sum_feature, aes(x = time, y = value)) +
 
 plot
 
-ggsave(plot,filename = "/media/romuald/TOSHIBA EXT/Romuald_NGS/MARS-ATAC/exp/ATAC_peak_annotation/2021_01_01/plot_feature_all.svg",
+ggsave(plot,filename = paste0("/home/romuald/MARS-ATAC/exp/ATAC_peak_annotation/", output_dir,"/plot_feature_all.svg"),
   width = 200,
   height = 200,
   units = "mm")
@@ -304,7 +322,7 @@ plot <- ggplot(df_sum_feature_subset, aes(x = time, y = value)) +
 
 plot
 
-ggsave(plot,filename = "/media/romuald/TOSHIBA EXT/Romuald_NGS/MARS-ATAC/exp/ATAC_peak_annotation/2021_01_01/plot_feature_subset.svg",
+ggsave(plot,filename = paste0("/home/romuald/MARS-ATAC/exp/ATAC_peak_annotation/", output_dir,"/plot_feature_subset.svg"),
   width = 200,
   height = 120,
   units = "mm")
