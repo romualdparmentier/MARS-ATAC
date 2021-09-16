@@ -36,7 +36,7 @@ library(rlang) # pour utiliser case_when(!!!parse_exprs)
 
 pic_last_dir = function(parent_folder){
   
-  dir = list.dirs(path = parent_folder, recursive = F)
+  dir = list.dirs(path = parent_folder, recursive = F, full.names = F)
   dir = dir[length(dir)]
 
     return(paste0(parent_folder,dir))
@@ -50,8 +50,8 @@ pic_last_dir = function(parent_folder){
 # Direction de travail
 
 dir_data = "/home/romuald/MARS-ATAC/data/"
-dir_data_peaks = pic_last_dir(parent_folder = "/home/romuald/MARS-ATAC/exp/ATAC_peak_annotation")
-dir_data_readscount = pic_last_dir(parent_folder ="/home/romuald/MARS-ATAC/exp/ATAC_peak_readcount")
+dir_data_peaks = pic_last_dir(parent_folder = "/home/romuald/MARS-ATAC/exp/ATAC_peak_annotation/")
+dir_data_readscount = pic_last_dir(parent_folder ="/home/romuald/MARS-ATAC/exp/ATAC_peak_readcount/")
 
 ```
 
