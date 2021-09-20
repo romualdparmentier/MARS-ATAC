@@ -4,3 +4,6 @@
 
 # Ignore output data files
 exp/
+
+# Ignore Rhistory
+.Rhistory
