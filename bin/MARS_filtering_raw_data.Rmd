@@ -78,7 +78,7 @@ unnest_dt <- function(tbl, col) {
 - Le fichiers H619_annotation_AM.bed est le fichier brute de sortie d'alignement  
 
 ```{r Loading des data brutes, warning = FALSE}
-data <- as.data.frame(fread("/home/romuald/Bureau/MARS_seq_temp/Data_analyse/Filtering_data_brut/H619_annotation_AM.bed"))
+data <- as.data.frame(fread("/home/romuald/Bureau/MARS_seq_temp/Data_analyse/Filtering_data_brut/raw_count_matrix.bed"))
 # Fread est une fonction de data.table qui permet d'ouvrir plus rapidement ce genre de tableau volumineux
 
 kable(data[1:5,])# Ces colonnes regroupet toutes les info expérimentales
