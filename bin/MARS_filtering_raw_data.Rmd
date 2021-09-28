@@ -1,10 +1,12 @@
 ---
 title: "Data brutes : filtres"
 author: "Romuald & Laëitia"
-date: "6 mars 2020"
+date: "13 avril  2020"
 output:
   html_document:
     code_folding: "hide"
+    toc: true
+    toc_float: false
 editor_options: 
   chunk_output_type: inline
 ---
@@ -13,7 +15,7 @@ Le but de ce document est d'expliciter toutes les étapes de filtre par lesquell
 
 ```{r setup, include=FALSE}
 
-setwd(dir = "/home/romuald/Bureau/MARS_seq_temp/Data_analyse/Filtering_data_brut")
+setwd(dir = "/home/romuald/Bureau/MARS_seq_temp/Filtering_data_brut")
 
 suppressMessages(library(data.table))
 suppressMessages(library(rlang))
@@ -23,29 +25,48 @@ suppressMessages(library(tidyr))
 suppressMessages(library(ggplot2))
 suppressMessages(library(stringr))
 suppressMessages(library(reshape))
-suppressMessages(library(Rtsne))
+# suppressMessages(library(Rtsne))
 suppressMessages(library(knitr))
+library(rvg)
+library(officer)
+library(ggthemes)
 ```
 
 ```{r function, include=FALSE}
+
+create_pptx <- function(plot, path){
+  
+    if(!file.exists(path)) {
+        out <- read_pptx()
+    } else {
+        out <- read_pptx(path)
+    }
+    
+    out %>%
+        add_slide(layout = "Title and Content", master = "Office Theme") %>%
+        ph_with(dml(ggobj = plot), location = ph_location_fullsize()) %>% 
+        print(target = path)
+}
 
 # Fonction qui permet de retourner le nombre de cellules éliminées par le filtre
 count_cell_filtered_function = function(df){
   
   count_cell = as.data.frame(table(df$cell,
-                           df$condition,
-                           df$donor))
+                             df$condition,
+                             df$donor)
+                            )
 
-cell_filtered = count_cell %>% filter(Freq == 0)
+  cell_filtered = count_cell %>% filter(Freq == 0)
 
-count_filtered = as.data.frame(table(cell_filtered$Freq,
+  count_filtered = as.data.frame(table(cell_filtered$Freq,
                                      cell_filtered$Var2,
-                                     cell_filtered$Var3)
-                               )
+                                     cell_filtered$Var3
+                                     )
+                                )
 
-colnames(count_filtered) = c("Filter","Time","Donor","Nb_cell_filtered") 
+  colnames(count_filtered) = c("Filter","Time","Donor","Nb_cell_filtered") 
 
-return(count_filtered[,4])
+  return(count_filtered[,4])
 
 }
 
@@ -61,9 +82,7 @@ unnest_dt <- function(tbl, col) {
   
   tbl <- as.data.table(tbl)
   
-  tbl <- eval(
-    expr(tbl[, as.character(unlist(!!!col)), by = list(!!!clnms)])
-  )
+  tbl <- eval(expr(tbl[, as.character(unlist(!!!col)), by = list(!!!clnms)]))
   
   colnames(tbl) <- c(as.character(clnms), as.character(col))
   
@@ -78,11 +97,13 @@ unnest_dt <- function(tbl, col) {
 - Le fichiers H619_annotation_AM.bed est le fichier brute de sortie d'alignement  
 
 ```{r Loading des data brutes, warning = FALSE}
-data <- as.data.frame(fread("/home/romuald/Bureau/MARS_seq_temp/Data_analyse/Filtering_data_brut/raw_count_matrix.bed"))
+data <- as.data.frame(fread("/home/romuald/Bureau/MARS_seq_temp/Filtering_data_brut/H619_annotation_AM.bed"))
 # Fread est une fonction de data.table qui permet d'ouvrir plus rapidement ce genre de tableau volumineux
 
-kable(data[1:5,])# Ces colonnes regroupet toutes les info expérimentales
-
+kable(data[1:5,], # Ces colonnes regroupet toutes les info expérimentales
+      align = 'ccccccccc',
+      caption = "Apperçu matrice d'expression au format gather pour les gènes"
+      )
 ```
 
 - Le fichier Normalization_R0.6_pool_duplicate est le fichier qui résume les scores de Pearson pour toutes les cellules  
@@ -91,9 +112,11 @@ kable(data[1:5,])# Ces colonnes regroupet toutes les info expérimentales
    
 ```{r Loading des data brutes bis}
 
-Normalization_R0.6 = read.table(file = "/home/romuald/Bureau/MARS_seq_temp/Data_analyse/Filtering_data_brut/Normalization_R0.6_pool_duplicate.txt")
+Normalization_R0.6 = read.table(file = "/home/romuald/Bureau/MARS_seq_temp/Filtering_data_brut/Normalization_R0.6_pool_duplicate.txt")
 
-kable(Normalization_R0.6[1:5,])
+kable(Normalization_R0.6[1:5,],
+      align = 'ccccccc', 
+      caption = "Apperçu tableau corrélation Pearson ERCC")
 
 ```
 
@@ -114,8 +137,8 @@ df = filter(data, !chr %in% c("chrY")) %>%
                              transcript_status = str_match(string = gene,pattern="transcript_status ([A-Z]+)")[,2],
                              transcript_name_chr = str_c(transcript_name,chr, sep="; "))
 
-kable(df[1:5,1:7])
-kable(df[1:5,8:14])
+kable(df[1:5,1:7], align = 'ccccccc')
+kable(df[1:5,8:14], align = 'ccccccc')
 
 ```
 
@@ -133,7 +156,9 @@ recap_cell_filter = data.frame("Time" = rep(c("00Hrs","24Hrs","48Hrs","72Hrs","9
                              "Donor" = c(rep(1,5),rep(2,5)),
                              "nb_cell_brut" = rep(96,10))
 
-kable(recap_cell_filter)
+kable(recap_cell_filter,
+      align = 'ccc', 
+      caption = "Tableaux recapitulatif du nombre de cellules")
 
 ```
 
@@ -143,18 +168,19 @@ kable(recap_cell_filter)
 
 ```{r plot }
 
-df_read_plot = df %>% group_by(condition, cell, donor) %>% 
-  summarise(reads_tot = sum(reads_sum)) %>%
-  ungroup() %>%
-  group_by(condition, cell, donor) %>%
-  summarise(reads_tot = unique(reads_tot))
+df_read_plot = df %>% 
+               group_by(condition, cell, donor) %>% 
+               summarise(reads_tot = sum(reads_sum)) %>%
+               ungroup() %>%
+               group_by(condition, cell, donor) %>%
+               summarise(reads_tot = unique(reads_tot))
 
 plot = ggplot(data = df_read_plot, aes(df_read_plot$reads_tot)) +
-  geom_histogram(bins = 100, fill = "white", colour = "black") +
-  geom_vline(xintercept = 80000, color = "red", linetype = "dashed" ) +
-  xlab(label = "nb reads total (d1 & d2 merged)") +
-  geom_text(x = 1250000, y = 40, label = "< 80 000 reads = 134") + 
-  geom_text(x = 1250000, y = 35, label = "> 80 000 reads = 826")  
+       geom_histogram(bins = 100, fill = "white", colour = "black") +
+       geom_vline(xintercept = 80000, color = "red", linetype = "dashed" ) +
+       xlab(label = "nb reads total (d1 & d2 merged)") +
+       geom_text(x = 1250000, y = 40, label = "< 80 000 reads = 134") + 
+       geom_text(x = 1250000, y = 35, label = "> 80 000 reads = 826")  
 
 plot
 
@@ -162,18 +188,23 @@ plot
 
 ```{r Filtre reads totaux/cellule}
 
-df_cell_filter = df %>% group_by(condition, cell, donor) %>% 
-  summarise(reads_tot = sum(reads_sum)) %>% #On somme les reads obtenus pour chacun des gènes dans chacune des cellule/temps/donneur
-  filter(reads_tot > 80000) %>% #Les cellules avec moins de 80K reads sont filtrées
-  ungroup() %>%
-  inner_join(df,by = c("condition","cell","donor"))
+df_cell_filter = df %>% 
+                 group_by(condition, cell, donor) %>% 
+                 summarise(reads_tot = sum(reads_sum)) %>%
+                 filter(reads_tot > 80000) %>% #Les cellules avec moins de 80K reads sont filtrées
+                 ungroup() %>%
+                 inner_join(df,by = c("condition","cell","donor"))
 
 # On affiche le nombre de cellules affectées par ce filtre :
 
 recap_cell_filter = recap_cell_filter %>%
-  mutate(nb_cell_UMI_sum_filter = recap_cell_filter[,"nb_cell_brut"]-count_cell_filtered_function(df_cell_filter))
+                    mutate(nb_cell_UMI_sum_filter = 
+                    recap_cell_filter[,"nb_cell_brut"] - count_cell_filtered_function(df_cell_filter)
+                          )
 
-kable(recap_cell_filter)
+kable(recap_cell_filter, 
+      align = 'cccc',
+      caption = "Tableaux recapitulatif du nombre de cellules après filtres")
 
 ```
 
@@ -184,26 +215,33 @@ kable(recap_cell_filter)
 ```{r Filtre proportion chrM}
 
 # On calcule d'abord le % de chaque chr pour chaque cellule
-df_temp = df_cell_filter %>% group_by(condition,cell,donor,chr) %>%
-  summarise(UMI_number = sum(UMI_sum)) %>% 
-  ungroup() %>%
-  group_by(condition,cell,donor) %>% 
-  mutate(percentage_chr_per_cell = UMI_number/sum(UMI_number))
+df_temp = df_cell_filter %>% 
+          group_by(condition,cell,donor,chr) %>%
+          summarise(UMI_number = sum(UMI_sum)) %>% 
+          ungroup() %>%
+          group_by(condition,cell,donor) %>% 
+          mutate(percentage_chr_per_cell = UMI_number/sum(UMI_number))
 
-df_temp = df_temp %>% ungroup() %>% 
-  filter(chr == "chrM") %>% # On ne garde que l'info du chromosome M
-  filter(percentage_chr_per_cell <= 0.1) # On créé une liste avec seules les cellules < 10% pour le chrM
+df_temp = df_temp %>% 
+          ungroup() %>% 
+          filter(chr == "chrM") %>% # On ne garde que l'info du chromosome M
+          filter(percentage_chr_per_cell <= 0.1) # Liste avec seules les cellules < 10% pour le chrM
 
 # Application du filtre sur les données
-df_cell_filter = inner_join(df_cell_filter,df_temp[,1:3], by = c("condition","cell","donor")) %>%
-  filter(!chr %in% "chrM")
+df_cell_filter = inner_join(df_cell_filter,df_temp[,1:3], 
+                            by = c("condition","cell","donor")) %>%
+                 filter(!chr %in% "chrM")
 
 # On affiche le nombre de cellules affectées par ce filtre :
 
 recap_cell_filter = recap_cell_filter %>%
-  mutate(nb_cell_chrM_prop_filter = recap_cell_filter[,"nb_cell_brut"]-count_cell_filtered_function(df_cell_filter))
+                    mutate(nb_cell_chrM_prop_filter =
+                    recap_cell_filter[,"nb_cell_brut"] - count_cell_filtered_function(df_cell_filter)
+                           )
 
-kable(recap_cell_filter)
+kable(recap_cell_filter,
+      align = 'ccccc',
+      caption = "Tableaux recapitulatif du nombre de cellules" )
 
 ```
 
@@ -213,16 +251,22 @@ kable(recap_cell_filter)
 
 ```{r Filtre linéarité amplification, warning = FALSE}
 
-  df_cell_filter = suppressMessages(df_cell_filter %>% inner_join(Normalization_R0.6[,c(1,2,3)], 
-                       by = c("condition","cell","donor")))
-# Le tableau de normalisation contient déjà que les cellules avec un coeff > 0.6
+  df_cell_filter = df_cell_filter %>%
+                  inner_join(Normalization_R0.6[,c(1,2,3)], 
+                             by = c("condition","cell","donor")
+                             )
+# Le tableau de normalisation ne contient déjà que les cellules avec un coeff > 0.6
 
 # On affiche le nombre de cellules affectées par ce filtre :
 
 recap_cell_filter = recap_cell_filter %>%
-  mutate(nb_cell_Pearson_filter = recap_cell_filter[,"nb_cell_brut"]-count_cell_filtered_function(df_cell_filter))
+                    mutate(nb_cell_Pearson_filter =                                                                      recap_cell_filter[,"nb_cell_brut"]-count_cell_filtered_function(df_cell_filter)
+                           )
 
-kable(recap_cell_filter)
+kable(recap_cell_filter,
+      align = 'cccccc',
+      caption = "Tableaux recapitulatif du nombre de cellules")
+
 
 ```
 
@@ -233,13 +277,15 @@ kable(recap_cell_filter)
 
 ```{r Création tableau recap filtre gènes}
 
-  recap_gene_filter = as.data.frame(table(df_cell_filter$cell, 
+recap_gene_filter = as.data.frame(table(df_cell_filter$cell, 
                                              df_cell_filter$condition, 
                                              df_cell_filter$donor)) %>% filter(Var1 == "TAG15")
 
-  colnames(recap_gene_filter) = c("Cell","Time","Donor","nb_gene_brut")
+colnames(recap_gene_filter) = c("Cell","Time","Donor","nb_gene_brut")
   
-  kable(recap_gene_filter)
+kable(recap_gene_filter, 
+      align = 'cccc',
+      caption = "Tableaux recapitulatif du nombre de gène détectés dans une cellule (n°15 ici)")
 
 ```
 
@@ -250,16 +296,19 @@ kable(recap_cell_filter)
     
 ```{r Filtre nature des transcrits}
  
-  df_gene_filter = df_cell_filter %>% filter(gene_type == "protein_coding", !transcript_status == "PUTATIVE") 
+df_gene_filter = df_cell_filter %>% 
+                 filter(gene_type == "protein_coding", !transcript_status == "PUTATIVE") 
 
-  new_col = as.data.frame(table(df_gene_filter$cell, 
-                                df_gene_filter$condition, 
-                                df_gene_filter$donor)) %>% filter(Var1 == "TAG15")
+new_col = as.data.frame(table(df_gene_filter$cell, 
+                              df_gene_filter$condition,                                                                            df_gene_filter$donor)) %>% filter(Var1 == "TAG15")
   
-  colnames(new_col) = c("Cell","Time","Donor","nb_gene_type_filter")
-  recap_gene_filter = recap_gene_filter %>% inner_join(new_col, by = c("Cell","Time","Donor"))
+colnames(new_col) = c("Cell","Time","Donor","nb_gene_type_filter")
+recap_gene_filter = recap_gene_filter %>% 
+                    inner_join(new_col, by = c("Cell","Time","Donor"))
 
-  kable(recap_gene_filter)
+kable(recap_gene_filter,
+      align = 'ccccc',
+      caption = "Tableaux recapitulatif du nombre de gènes dans une cellule après filtres")
   
 ```
 
@@ -278,22 +327,29 @@ df_gene_filter = df_gene_filter[,-c(6,7,9,11,13,14)]
 
 # On transforme la colonne UMIs (ex : "CAAA, GGGG") en liste (ex : "CAAA" "GGGG")
 df_gene_filter = df_gene_filter %>%
-  mutate(UMI = str_split(UMIs, pattern = ","))  
+                 mutate(UMI = str_split(UMIs, pattern = ","))  
 
 # On ajoute une ligne par UMI détecté dans les listes crées précédement 
 df_part_2 = unnest_dt(df_gene_filter,UMI)[] # Fonction récupérée sur internet qui fait fonctionner data.table (100x plus rapide)
 UMI_temp = as.data.frame(df_part_2[,10]) # On stock cet élément
 
 # On transforme la colonne readss (ex : "111, 2") en liste (ex : "111" "2")
-df_gene_filter = df_gene_filter %>% mutate(reads = str_split(readss, pattern = ",")) %>% select(-UMI)
+df_gene_filter = df_gene_filter %>% 
+                 mutate(reads = str_split(readss, pattern = ",")) %>% select(-UMI)
+
 df_gene_filter = unnest_dt(df_gene_filter,reads)
 
 # On fait fusionner les deux tableaux unnest
-df_gene_filter = df_gene_filter %>% bind_cols(UMI_temp)
+df_gene_filter = df_gene_filter %>% 
+                 bind_cols(UMI_temp)
+
 df_gene_filter = df_gene_filter[,c(-6,-7)]
 
+suppressMessages(gc())
 rm(df_part_2)
 rm(UMI_temp)
+rm(plot)
+rm(df_read_plot)
 
 ```
 
@@ -305,7 +361,8 @@ rm(UMI_temp)
  ==> ou le même gène a deux status différents (novel/known)  
  ==> Je garde uniquement l'un des 2 ENSG.  
 
-- Certains gènes ont tous les paramètres identiques, mais un nombre de reads différens, il s'agit de vrais dupliquats techniques pour lequels il convient de sommer les reads obtenus   
+- Certains gènes ont tous les paramètres identiques, mais un nombre de reads différens, il s'agit de vrais dupliquats techniques pour lequels il convient de sommer les reads obtenus  
+ 
   
 ```{r Filtre duplicats UMI}
 
@@ -317,12 +374,13 @@ table(dup_row) # Il n'y en a pas, donc pas de somme
 # Si tout pareil, mais ENSG différents
 # ==> Alors on ne garde qu'une seule des deux ENSG (car c'est le même read!)
 
-# df_gene_filter_f1 = df_gene_filter %>% 
-#   group_by(condition, cell, donor, chr, reads_tot, transcript_name_chr, UMI, reads) %>% 
-#   distinct(transcript_name_chr, .keep_all = T) %>% #ne garde qu'une des deux lignes
-#   ungroup()
+ # df_gene_filter_f1 = df_gene_filter %>% 
+ #   group_by(condition, cell, donor, chr, reads_tot, transcript_name_chr, UMI, reads) %>% 
+ #   distinct(transcript_name_chr, .keep_all = T) %>% #ne garde qu'une des deux lignes
+ #   ungroup()
 
-load("/home/romuald/Bureau/MARS_seq_temp/Data_analyse/Filtering_data_brut/df_gene_filter1") # Tableau généré sur un rdi avec plus de RAM (env 20Gb nécessaires)
+load("/home/romuald/Bureau/MARS_seq_temp/Filtering_data_brut/df_gene_filter1.rda") 
+# Tableau généré sur un ordi avec plus de RAM (env 20Gb nécessaires)
 
 # Vrai duplicats tech sommés
 
@@ -331,80 +389,223 @@ load("/home/romuald/Bureau/MARS_seq_temp/Data_analyse/Filtering_data_brut/df_gen
 #   summarise(reads = sum(as.numeric(reads))) %>% # Somme des vrais dupliquats techniques (tout pareil sauf nb reads)
 #   ungroup()
 
-load("/home/romuald/Bureau/MARS_seq_temp/Data_analyse/Filtering_data_brut/df_gene_filter2") # Tableau généré sur un rdi avec plus de RAM (env 20Gb nécessaires)
+load("/home/romuald/Bureau/MARS_seq_temp/Filtering_data_brut/df_gene_filter2.rda") 
+# Tableau généré sur un ordi avec plus de RAM (env 20Gb nécessaires)
 
-  df_duplicate_filter = data.frame("Nb_tot_bulk_brut" = nrow(df_gene_filter),
-                                   "remove_virtual_Duplicate" = nrow(df_gene_filter_f1),
-                                   "merge_real_duplicate" = nrow(df_gene_filter_f2))
+df_duplicate_filter = data.frame("Nb_tot_bulk_brut" = nrow(df_gene_filter),                                                           "remove_virtual_Duplicate" = nrow(df_gene_filter_f1),                                                "merge_real_duplicate" = nrow(df_gene_filter_f2))
   
-  rownames(df_duplicate_filter) = "nb_total_gene_bulk"
+rownames(df_duplicate_filter) = "nb_total_gene_bulk"
 
-  kable(df_duplicate_filter)
+kable(df_duplicate_filter,
+      align = 'ccc')
 
 ```
 
 ```{r Menage, include = FALSE}
-  df_gene_filter = df_gene_filter_f2
-  rm(df_gene_filter_f1, df_gene_filter_f2)
-  gc()
+
+df_gene_filter = df_gene_filter_f2
+rm(df_gene_filter_f1, df_gene_filter_f2, dup_row)
+gc()
+  
 ```
 
 ### Filtre sur le nombre de reads détecté par gènes  
   
-- Si un gène n'a été détecté qu'avec un total de un seul reads, il est considéré comme étant une erreur expériemntale  
+~~- Si un gène n'a été détecté qu'avec un total de un seul reads, il est considéré comme étant une erreur expériemntale~~  
+**==> Ce filtre a été enlevé et remplacé à l'épate suivante par  un filtre opérant conjointement sur le nombre d'UMI et le nombre de reads**
   
 ```{r Filtre  reads/gène}
 
-df_gene_filter = df_gene_filter %>% filter(reads > 1)
+# df_gene_filter = df_gene_filter %>% filter(reads > 1)
+# 
+ ### Visualisation de l'effet du filtre sur le nombre total de gènes :
+# 
+# df_duplicate_filter["reads_inferior_1"] = nrow(df_gene_filter)
+# kable(df_duplicate_filter)
 
-### Visualisation de l'effet du filtre sur le nombre total de gènes :
+ ### Visualisation de l'effet du filtre reads < 1 sur une seule cellule :
+#   
+#     new_col = as.data.frame(table(df_gene_filter$cell, 
+#                                 df_gene_filter$condition, 
+#                                 df_gene_filter$donor)) %>% filter(Var1 == "TAG15")
+#   
+#   colnames(new_col) = c("Cell","Time","Donor","reads_inferior_1")
+#   recap_gene_filter = recap_gene_filter %>% inner_join(new_col, by = c("Cell","Time","Donor"))
+#   
+#   kable(recap_gene_filter)
+  
+```
 
-df_duplicate_filter["reads_inferior_1"] = nrow(df_gene_filter)
-kable(df_duplicate_filter)
+### Statistiques qualité sur les UMI
+
+Afin d'observer si un quelconque biais vient fausser les données en ammont, plusieurs statistiques ont été calculées : 
+
+```{r statistiques UMI, warning = FALSE}
+# On enlève les espaces qui apparaissent parfois en premier caractère dans les UMI
+
+df_gene_filter$UMI = str_replace(string = df_gene_filter$UMI, pattern = " ",replacement = "")
+
+df_gene_filter_before = df_gene_filter
+
+# On plot la représentation des UMI
+sorted_nb_UMI = as.data.frame(sort(table(df_gene_filter$UMI)))
+
+ggplot(data = sorted_nb_UMI, aes(x = Var1,y = Freq)) +
+  geom_col() +
+  geom_vline(xintercept = "TTTC", color = "red", linetype = "dashed") +
+  geom_text(x = "TGGC" , y = 3e+05, label = "T&G rich UMI sequences", color = "red") +
+  ggtitle(label = "UMI sequence representation, all condition mixed")
+  
+# test = df_gene_filter %>% group_by(donor, condition, transcript_name_chr) %>% summarise(n_distinct(UMI))
 
 # On regroupe les gènes par leur nom et on somme les reads et les UMI :
 df_gene_filter = df_gene_filter %>%
-group_by(condition, cell, donor, transcript_name_chr) %>% # Regroupe UMI identiques réplicats tech sur flowcell
-  summarise(read_sum = sum(reads),
-            UMI_sum = n_distinct(UMI)) 
+                 group_by(condition, 
+                          cell, 
+                          donor, 
+                          transcript_name_chr) %>% # Rgrpe UMI idem rép tech sur flowcell
+                 summarise(read_sum = sum(reads),
+                 UMI_sum = n_distinct(UMI)
+                          ) 
+# On plot le nombre d'UMI détectés par cellule avant le filtre
 
-### Visualisation de l'effet du filtre reads < 1 sur une seule cellule :
+# Donor 1
+plot = df_gene_filter %>% 
+  filter(donor == 1) %>%
+  group_by(donor, condition, cell) %>% 
+  summarise(sum_tot_UMI = sum(UMI_sum)) %>%
+  group_by(condition, cell) %>%
+  arrange(sum_tot_UMI)
+
+ggplot(data = plot, aes(x = reorder(cell, sum_tot_UMI), y = sum_tot_UMI)) +
+  stat_summary(geom = "bar", position = "dodge") +
+  ggtitle("Nb of UMI detected in each cell, donor 1 ")
+  facet_wrap(vars(condition))
+
+# Donor 2
+plot = df_gene_filter %>% 
+  filter(donor == 2) %>%
+  group_by(donor, condition, cell) %>% 
+  summarise(sum_tot_UMI = sum(UMI_sum)) %>%
+  group_by(condition, cell) %>%
+  arrange(sum_tot_UMI)
+
+ggplot(data = plot, aes(x = reorder(cell, sum_tot_UMI), y = sum_tot_UMI)) +
+  stat_summary(geom = "bar", position = "dodge") +
+  ggtitle("Nb of UMI detected in each cell, donor 2")
+  facet_wrap(vars(condition))
+
+  # On plot les 50 gènes qui consomment le plus de read / condition : 
   
-    new_col = as.data.frame(table(df_gene_filter$cell, 
-                                df_gene_filter$condition, 
-                                df_gene_filter$donor)) %>% filter(Var1 == "TAG15")
-  
-  colnames(new_col) = c("Cell","Time","Donor","reads_inferior_1")
-  recap_gene_filter = recap_gene_filter %>% inner_join(new_col, by = c("Cell","Time","Donor"))
-  
-  kable(recap_gene_filter)
-  
+  # Craton du tableau
+df_gene_filter = df_gene_filter %>% 
+  group_by(donor,condition, cell) %>%
+  mutate(tot_read_cell = sum(read_sum))%>%
+  mutate(prop_gene_cell = (read_sum/tot_read_cell)*100)
+
+df_top = df_gene_filter %>% 
+  group_by(donor,condition, transcript_name_chr) %>% 
+  summarise(sum_tot_gene_read = sum(read_sum)) %>%
+  ungroup() %>%
+  group_by(donor,condition) %>%
+  mutate(total_read_sum = sum(sum_tot_gene_read)) %>%
+  ungroup()%>%
+  mutate(prop_gene = (sum_tot_gene_read/total_read_sum)*100) %>%
+  group_by(donor,condition) %>%
+  top_n(50,sum_tot_gene_read) 
+
+# Donor 1
+df_top_plot = inner_join(df_gene_filter, df_top, by = c("donor","condition","transcript_name_chr"))
+df_top_plot = df_top_plot %>% filter(donor == 1) 
+
+ lapply(sort(unique(df_top_plot$condition)), 
+   function(x) {
+     
+      ggplot(data = df_top_plot[df_top_plot$condition == x,])+
+       geom_point(aes(x = prop_gene, y = reorder(transcript_name_chr,prop_gene)), shape = 1, color = "red")+
+       geom_point(aes(x = prop_gene_cell, y = transcript_name_chr), shape = 3, alpha = 0.2)+
+       theme_bw()+
+       ggtitle(label = paste0("Top 50 account 'consuming reads gene' for donor 1 : ", x))+ 
+       labs(x = "% of total")
+     
+       }
+   )
+ 
+ # Donor 2
+df_top_plot = inner_join(df_gene_filter, df_top, by = c("donor","condition","transcript_name_chr"))
+df_top_plot = df_top_plot %>% filter(donor == 2) 
+
+ lapply(sort(unique(df_top_plot$condition)), 
+   function(x) {
+     
+      ggplot(data = df_top_plot[df_top_plot$condition == x,])+
+       geom_point(aes(x = prop_gene, y = reorder(transcript_name_chr,prop_gene)), shape = 1, color = "red")+
+       geom_point(aes(x = prop_gene_cell, y = transcript_name_chr), shape = 3, alpha = 0.2)+
+       theme_bw()+
+       ggtitle(label = paste0("Top 50 account 'consuming reads gene' for donor 2 : ", x),
+          subtitle = "Red dot = % of total read consumed by this gene (all cells summed)\nCross = % of read consumed by this gene for one cell")+ 
+       labs(x = "relative % (total or individual cell) of reads", y = "Top 50 genes") 
+     
+       }
+   )
 ```
 
 
 ### Filtre sur la somme des UMI par gène  
   
-- Si un gène n'a été détecté qu'avec un total de un seul UMI, il est considéré comme étant une erreur expériemntale  
+- Si un gène n'a été détecté qu'avec un total de un seul UMI, il est considéré comme étant une erreur expériemental. 
+**- De plus, même avec plus d'un UMI, la somme totale des reads pour ce gène doit dépasser 5 pour qu'il soit gardé.**  
   
 ```{r Filtre somme UMI/gène}
 
-### Filtre UMI < 1
+### Filtre UMI < 2 et reads < 5
   
-  df_gene_filter = df_gene_filter %>% filter(UMI_sum > 1)
+df_gene_filter = df_gene_filter %>% filter(UMI_sum > 1) %>% filter(read_sum > 4)
+
   
-  ### Visualisation de l'effet du filtre UMIs < 1 :
+### Visualisation de l'effet du filtre UMIs < 2 & reads < 5:
   
-    new_col = as.data.frame(table(df_gene_filter$cell, 
+new_col = as.data.frame(table(df_gene_filter$cell, 
                                 df_gene_filter$condition, 
                                 df_gene_filter$donor)) %>% filter(Var1 == "TAG15")
   
-  colnames(new_col) = c("Cell","Time","Donor","UMIs_inferior_1")
-  recap_gene_filter = recap_gene_filter %>% inner_join(new_col, by = c("Cell","Time","Donor"))
+colnames(new_col) = c("Cell","Time","Donor","UMIs_inferior_1 & reads_inf_4")
+recap_gene_filter = recap_gene_filter %>% 
+                    inner_join(new_col, by = c("Cell","Time","Donor"))
   
-   kable(recap_gene_filter)
+kable(recap_gene_filter)
+   
+```
+
+### Filtre sur le partage minimum d'un gène au sein de la population  
+
+**Rajout d'un filtre qui ne prend en considération que les gènes qui sont partagés par au moins 2 cellules au sein d'un point de temps (donneur séparé)**  
+
+```{r filtre partage gène }
+
+df_gene_shared = df_gene_filter %>% 
+                 group_by(donor, condition, transcript_name_chr) %>% 
+                 summarise(sum_cell = n_distinct(cell)) %>%
+                 filter(sum_cell > 1)
+
+df_gene_filter = inner_join(df_gene_filter, df_gene_shared,
+                              by = c("donor","condition","transcript_name_chr"))
+
+new_col = as.data.frame(table(df_gene_filter$cell, 
+                                df_gene_filter$condition, 
+                                df_gene_filter$donor)) %>% filter(Var1 == "TAG15")
+  
+colnames(new_col) = c("Cell","Time","Donor","Min_cell_share = 2")
+recap_gene_filter = recap_gene_filter %>% 
+                    inner_join(new_col, by = c("Cell","Time","Donor"))
+  
+kable(recap_gene_filter,
+      align = rep('c',ncol(recap_gene_filter)),
+      caption = "Tableaux recapitulatif du nombre de gènes dans une cellule après filtres")
 
 ```
-  
+
+
 ### Extrapolation nb molecules  
   
 - Grâce aux spikes présent dans chaque cellule et à la droite de régression linéaire qu'il a été possible de tracer grâce à eux, on peut estimer le nombre de molecule  propre à chaque cellule pour chaque gène  
@@ -412,26 +613,26 @@ group_by(condition, cell, donor, transcript_name_chr) %>% # Regroupe UMI identiq
 ```{r Molecules and export, warning = FALSE}
 
 df_gene_filter = df_gene_filter %>% 
-  inner_join(Normalization_R0.6[,c(1,2,3,6,7)], by = c("condition","cell","donor")) %>%
-  mutate(molecules = exp((log(UMI_sum)-b)/a))
+                 inner_join(Normalization_R0.6[,c(1,2,3,6,7)], 
+                            by = c("condition","cell","donor")) %>%
+                 mutate(molecules = exp((log(UMI_sum)-b)/a))
 
-save(df_gene_filter,file = "MARSseq_data_all_filters_20200306.rda") # Gene = lignes, cellules = colonnes
-write.csv2(df_gene_filter, file = "MARSseq_data_all_filters_20200306.csv")
+# Gene = lignes, cellules = colonnes
+#save(df_gene_filter,file = "MARSseq_data_all_filters_20200322.rda") 
+#write.csv2(df_gene_filter, file = "MARSseq_data_all_filters_20200322.csv")
 
-df_gene_filter = df_gene_filter[,-c(5,7,8,9)]
-spread_df = spread(df_gene_filter,transcript_name_chr,UMI_sum)
-spread_df = spread_df %>% replace(is.na(.),0)
-save(spread_df, file = "Spread_MARSseq_data_all_filters_20200306.rda") # Cellules = lignes, gènes = colonnes
-write.csv2(spread_df, file = "Spread_MARSseq_data_all_filters_20200306_2.csv")
+df_gene_filter = df_gene_filter[,c(1,2,3,4,6)]
+spread_df_gene_filter = pivot_wider(data = df_gene_filter,
+                                    names_from = transcript_name_chr,
+                                    values_from = UMI_sum)
+spread_df = spread_df_gene_filter %>% replace(is.na(.),0)
 
-spread_df_d1 = spread_df %>% filter(donor == 1)
-save(spread_df_d1, file = "Spread_MARSseq_data_all_filters_20200306_d1.rda") # Cellules = lignes, gènes = colonnes
-write.csv2(spread_df_d1, file = "Spread_MARSseq_data_all_filters_20200306_d1.csv")
-
-spread_df_d2 = spread_df %>% filter(donor == 2)
-save(spread_df_d2, file = "Spread_MARSseq_data_all_filters_20200306_d2.rda") # Cellules = lignes, gènes = colonnes
-write.csv2(spread_df_d2, file = "Spread_MARSseq_data_all_filters_20200306_d2.csv")
-
+# Cellules = lignes, gènes = colonnes
+# save(spread_df, file = "Spread_MARSseq_data_all_filters_20200405.rda") 
+# write.csv2(spread_df, file = "Spread_MARSseq_data_all_filters_20200405.csv")
+  
+kable(df_gene_filter[1:5,],
+      align = rep('c',ncol(df_gene_filter)))
 ```
 
 
@@ -440,24 +641,44 @@ write.csv2(spread_df_d2, file = "Spread_MARSseq_data_all_filters_20200306_d2.csv
 ```{r Nb moyen de gène/cellule}
 
 df_gene_filter_avg = df_gene_filter %>%
-  group_by(condition, cell, donor) %>%
-  summarise(nb_genes = length(unique(transcript_name_chr))) %>%
-  ungroup() 
+                     group_by(condition, cell, donor) %>%
+                     summarise(nb_genes = length(unique(transcript_name_chr)))
 
-avg_plot  = ggplot(df_gene_filter_avg,aes(x=condition,y=nb_genes))+
-  geom_boxplot() +
-  xlab("")+
-  ylab("Mean of genes per cell") +
-  facet_wrap(~donor)
+avg_plot  = ggplot(df_gene_filter_avg ,aes( x= condition,y = nb_genes,fill = donor)) +
+            geom_boxplot(width=0.5)+
+            xlab("") +
+            ylab("Number of genes detected") +
+            theme_tufte()
 
-avg_plot
+# create_pptx(plot = avg_plot, path = "~/Bureau/MARS_seq_temp/Filtering_data_brut/Script_&_Rapport/boxplot_gene.pptx")
 
 df_gene_filter_avg = df_gene_filter_avg %>%
-  group_by(condition,donor) %>%
-  summarise(avg_genes/cell = round(mean(nb_genes),0),
-            sd_genes = round(sd(nb_genes),0))
+                     group_by(condition,donor) %>%
+                     summarise(avg_genes_cell = round(mean(nb_genes),0),
+                               sd_genes = round(sd(nb_genes),0)
+                               )
 
-kable(df_gene_filter_avg)
+kable(df_gene_filter_avg,
+      align = rep('c', ncol(df_gene_filter_avg)),
+      caption = "Nb moyen de gènes exprimés par cellule")
+
 ```
 
-test = UMI_data %>% group_by(donor,condition) %>% summarise(nb_genes = n_distinct(tra))
+```{r}
+
+WGCNA_tab <- read.delim2("~/Bureau/WGCNA_tab.csv")
+WGCNA_tab$Time = factor(WGCNA_tab$Time)
+WGCNA_tab$Cluster = factor(WGCNA_tab$Cluster)
+WGCNA_tab$Donor = factor(WGCNA_tab$Donor)
+
+plot <- ggplot(data = WGCNA_tab)+
+  geom_line(aes(x = Time, y = Mean.expression, color = Cluster, group = Cluster))+
+  geom_point(aes(x = Time, y = Mean.expression, color = Cluster, group = Cluster, shape = Cluster), 
+    size = 3)+
+  theme_tufte()+
+  facet_wrap(vars(Donor))
+
+# create_pptx(plot = plot, path = "~/Bureau/MARS_seq_temp/Filtering_data_brut/Script_&_Rapport/WGCNA_plot.pptx")
+
+  ```
+
