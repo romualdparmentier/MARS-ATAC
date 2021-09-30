@@ -1,0 +1,1150 @@
+---
+title: "Correlation plots - Pearson cutoff & Sharing cells cell"
+author: "Romuald Parmentier"
+date: "03/05/2021"
+output: 
+  html_document:
+    code_folding: hide
+    df_print: kable
+    highlight: default
+    number_sections: yes
+    theme: journal  
+    toc: yes
+    toc_depth: 3
+    toc_float:
+      collapsed: no
+      smooth_scroll: yes 
+---
+
+<style type="text/css">
+  body{
+  font-size: 14pt;
+}
+</style>
+
+```{r setup, include=FALSE, message=FALSE, warning=FALSE}
+ 
+ library(ggplot2)
+ library(tidyverse)
+ library(propagate)
+ library(edgebundleR)
+ library(circlize)
+ library(igraph)
+ library(data.table)
+ library(rlist)
+
+```
+
+```{r BigCOR functions definition, include=FALSE}
+
+calculate_PearsCor_gene = function(spread_df, donor, minCell, cluster){
+  
+  donor_num = donor
+  cluster_num = cluster
+
+  spread_df$cluster = as.numeric(spread_df$cluster)
+  spread_df = spread_df %>% dplyr::filter(donor == donor_num) %>% dplyr::filter(cluster == cluster_num)### Select Cluster & Donor wanted
+  spread_df = spread_df[,5:ncol(spread_df)] ### Remove the 4 first column (not UMI values)
+  
+  spread_df_sub_bol = spread_df > 0 ### Convert all observation where there is an UMI value and convert it to TRUE or FALSE (if = 0)
+  dim(spread_df) == dim(spread_df_sub_bol) ### Check if the dimensions are ok
+  
+  sum_UMI_parGene = apply(spread_df_sub_bol,2,sum) ### Calculate the sum of TRUE for every column (arg = 2) (Gene) <==> calculate the nb of cell expressing at least one copy of the transcript
+  table(sum_UMI_parGene)
+  
+  shared_genes = which(colSums(spread_df_sub_bol) > minCell) ### Retrieve indices of genes for which the number of cell sharing this genes is > 5
+  spread_df = spread_df[,shared_genes] ### Subset only those genes
+  
+  spread_df = as.matrix(spread_df) ### Transform  df to matrix for bigcor to operate
+  spread_df = spread_df +1 ### add +1 for all values (avoid -inf for UMI)
+  spread_df = log2(spread_df) ### Transform all UMI values into log2
+  
+  COR = bigcor(spread_df, fun = "cor", size = 2000) ### Calculate the Pearson Correlation matrix breaking the original matrix into bloc of 2000x2000
+  
+  COR <- COR[1:nrow(COR), 1:ncol(COR)] ### Reconstitute the matrix with the correct number of row and column
+  # all.equal(COR, cor(spread_df)) # => TRUE
+  colnames(COR) = colnames(spread_df)
+  rownames(COR) = colnames(spread_df)
+  
+  return(COR)
+}
+
+calculate_PearsCor_cell = function(spread_df, donor, minCell, cluster){
+  
+  ### Same commment as calculate_PearsCor_gene function
+  
+  donor_num = donor
+
+  cluster_num = cluster
+
+  spread_df$cluster = as.numeric(spread_df$cluster)
+  spread_df = spread_df %>% filter(donor == donor_num) %>% filter(cluster == cluster_num)
+  spread_df = spread_df[,4:ncol(spread_df)]
+  
+  spread_df_sub_bol = spread_df > 0 ### Convert all observation where there is an UMI value and convert it to TRUE or FALSE (if = 0)
+  dim(spread_df) == dim(spread_df_sub_bol) ### Check if the dimensions are ok
+  
+  sum_UMI_parGene = apply(spread_df_sub_bol,2,sum) ### Calculate the sum of TRUE for every column (arg = 2) (Gene) <==> calculate the nb of cell expressing at least one copy of the transcript
+  table(sum_UMI_parGene)
+  
+  shared_genes = which(colSums(spread_df_sub_bol) > minCell) ### Retrieve indices of genes for which the number of cell sharing this genes is > 4
+  spread_df = spread_df[,shared_genes] ### Subset only those genes
+  
+  spread_df = as.matrix(spread_df)
+  spread_df = t(spread_df) ### Calculate the transposition in order to work on cell correlation and notgeene correlation anymore
+  spread_df = spread_df +1
+  spread_df = log2(spread_df)
+  
+  COR = bigcor(spread_df, fun = "cor", size = 2000)
+  
+  COR <- COR[1:nrow(COR), 1:ncol(COR)]
+  # all.equal(COR, cor(spread_df)) # => TRUE
+  
+  colnames(COR) = sprintf("cell_%d", 1:ncol(COR))
+  rownames(COR) = sprintf("cell_%d", 1:nrow(COR))
+  
+  # Plutôt que d'avoir à choisir un seuil de corrélation et à compter le nombre de corrélation, Sui Huang fait la moyenne des coeff de corrélation (d'où le fait de ne prendre qu'une demi matrice, puisque'elle est symétrique)
+  
+  return(COR)
+  
+}
+
+```
+
+```{r Filtration tableau RNAseq_ALL_GENES}
+
+# Load 
+spread_df <- read.csv("/home/romuald/Bureau/Analyses_MARS-ATAC/TF_vs_Prom_vs_Expr_redo/input_files/Spread_MARSseq_data_all_filters_20200728.csv", dec=",")
+
+# Reformater le tableau d'appartenance à un cluster
+cluster_df = read.csv2("/home/romuald/Bureau/Analyses_MARS-ATAC/cluster_cells.csv",sep = "\t")
+cluster_df = cluster_df %>% 
+  mutate(condition = paste0(condition,"Hrs"), .keep = "all") %>%
+  mutate(condition = str_replace(condition, pattern = "5Hrs", replacement = "05Hrs"))
+
+cluster_df$condition = as.factor(cluster_df$condition)
+
+spread_df = left_join(x = spread_df, y = cluster_df, by = c("donor", "condition", "cell"))
+spread_df = spread_df[-which(is.na(spread_df$cluster)),]
+spread_df = spread_df[,c(1:4,ncol(spread_df),5:(ncol(spread_df)-1))]
+
+
+# Rename all columns to get rid of "." because EdgeBundle consider them for grouping data
+names = colnames(spread_df)
+names = str_split_fixed(names, pattern = "\\.\\.", n=2)
+names = names[,1]
+names = str_replace_all(names, pattern = "\\.",replacement = "_")
+colnames(spread_df) = names
+
+#Extract Condition/Cell/Donor columns
+
+info_spread_df = spread_df[,2:5]
+gene_spread_df = spread_df[,6:ncol(spread_df)]
+
+spread_df = bind_cols(info_spread_df, gene_spread_df)
+
+### Décommenter si on veut retirer les gènes ribosomiques 
+
+# RPS_genes = which(grepl('^RPS',colnames(spread_df)))
+# RPL_genes = which(grepl('^RPL',colnames(spread_df)))
+# RPnum_genes = which(grepl('^RP\\d', colnames(spread_df)))
+# 
+# spread_df = spread_df[,-c(RPS_genes,RPL_genes,RPnum_genes)]
+
+```
+
+# Corrélations par gènes
+
+## Donneur 1
+\
+**Paramètres fixes :**\
+- Nombre de cellules minimum qui partagent le gène pour que celui-ci soit pris en compte = **2**\
+- Nombre de liens minimum dont le gène doit être la cible ou bien cibler = **2**\
+- Les gènes ribosomiques (et autres) **NE SONT PAS** filtrés
+
+### Sharing cells = 5 et Seuil 0.70
+```{r Per GENE - Tidy data and Bundle Diagram DONOR 1 - Seuil 0.70 - Min Cell 5, message=FALSE, warning=FALSE}
+
+  # For loop settings
+  cluster_num = 1:5
+  COR_cutoff = 0.70
+  minCell = 5
+  min_link = 2
+  donor = 1
+  
+  list_igraph_gene_d1 = list()
+  list_edges_gene_d1 = list()
+  list_df_recap_corr_gene_d1 = list()
+  list_mean_gene_d1 = list()
+  
+  for(i in 1:length(cluster_num)){
+    
+    ################################################
+    ############# Correlation Matrix ###############
+    ################################################
+    
+    
+    COR = calculate_PearsCor_gene(spread_df, donor = donor, minCell = minCell, cluster = cluster_num[i])
+    diag(COR) = 0
+    COR = abs(COR)
+    
+    COR_low = lower.tri(COR)
+    COR_low = COR[COR_low] 
+     
+    dim(COR_low) = NULL
+    COR_low = COR_low[!is.na(COR_low)]
+    COR_low[COR_low < 0.5] = 0 # Tout ce qui est en dessous de 0.5 on le fixe à zéro (que pour COR_low)
+    mean_gene = mean(COR_low) 
+    
+    COR[COR<COR_cutoff] = 0 #
+
+    
+    ################################################
+    ############### EdgeBundleR ####################
+    ################################################
+    
+    cor_g <- graph_from_adjacency_matrix(COR, mode='undirected', weighted = 'correlation')
+    edges <- igraph::as_data_frame(cor_g, 'edges')
+    
+    multi_from = edges %>%
+      group_by(from) %>%
+      filter(n()> min_link-1) # min_link -1 parce que si on veut minim 2 liens avec c'est n()>1
+    
+    multi_to = edges %>%
+      group_by(to) %>%
+      filter(n()> min_link-1)
+    
+    edges = bind_rows(multi_from, multi_to) %>% distinct()
+    
+    df_recap_corr = rbind(
+      as.data.frame(table(edges$from)),
+      as.data.frame(table(edges$to))) %>%
+      group_by(Var1) %>%
+      summarise(nb_corr = sum(Freq)) %>%
+      mutate(Cluster = paste("cluster",i))
+    
+
+    write.table(unique(c(edges$from,edges$to)),
+          paste0("/home/romuald/Bureau/Analyses_MARS-ATAC/Diagrammes_corrélation/output/Cell", minCell,
+          "_Cutoff0",COR_cutoff*100,
+          "/list_gene_cluster_correlations/list_gene_cluster", cluster_num[i],
+          "_Pearson_cutoff_", COR_cutoff,
+          "_MinCell_", minCell,
+          "_donor", donor,
+          ".csv"))
+    
+    igraph = graph_from_edgelist(as.matrix(edges[,1:2]), directed = F)
+    
+    list_df_recap_corr_gene_d1[[i]] = df_recap_corr
+    list_igraph_gene_d1[[i]] = igraph
+    list_edges_gene_d1[[i]] = edges
+    list_mean_gene_d1[[i]] = mean_gene
+    
+  }
+  
+  cat(paste("*********************************************\n"),
+    paste("************ DONNEUR", donor, "cluster", cluster_num[1],"***********\n"),
+    paste("******************************************\n"))
+  
+   paste("Il y a un total de", nrow(list_edges_gene_d1[[1]]), "corrélations entre les gènes")
+  
+    # edgebundle(list_igraph_gene_d1[[1]],tension=0.8,fontsize = 10, nodesize = 10)
+  
+    
+    cat(paste("*********************************************\n"),
+    paste("************ DONNEUR", donor, "cluster", cluster_num[2],"***********\n"),
+    paste("******************************************\n"))
+  
+   paste("Il y a un total de",nrow(list_edges_gene_d1[[2]]), "corrélations entre les gènes")
+  
+    # edgebundle(list_igraph_gene_d1[[2]], tension=0.8,fontsize = 10, nodesize = 10)
+    
+    cat(paste("*********************************************\n"),
+    paste("************ DONNEUR", donor, "cluster", cluster_num[3],"***********\n"),
+    paste("******************************************\n"))
+  
+   paste("Il y a un total de",nrow(list_edges_gene_d1[[3]]), "corrélations entre les gènes")
+  
+    # edgebundle(list_igraph_gene_d1[[3]], tension=0.8,fontsize = 10, nodesize = 10)
+    
+    cat(paste("*********************************************\n"),
+    paste("************ DONNEUR", donor, "cluster", cluster_num[4],"***********\n"),
+    paste("******************************************\n"))
+  
+   paste("Il y a un total de",nrow(list_edges_gene_d1[[4]]), "corrélations entre les gènes")
+  
+    # edgebundle(list_igraph_gene_d1[[4]], tension=0.8,fontsize = 10, nodesize = 10)
+    
+    cat(paste("*********************************************\n"),
+    paste("************ DONNEUR", donor, "cluster", cluster_num[5],"***********\n"),
+    paste("******************************************\n"))
+  
+    paste("Il y a un total de",nrow(list_edges_gene_d1[[5]]), "corrélations entre les gènes")
+  
+    # edgebundle(list_igraph_gene_d1[[5]], tension=0.8,fontsize = 10, nodesize = 10)
+    
+# Stock nb_cor en fonction du temps et des paramètre pour plot final
+    
+nb_cor = unlist(lapply(list_edges_gene_d1, nrow))
+cluster_num = paste("cluster",1:5)
+cluster_num = as.factor(cluster_num)
+
+df_plot_gene_d1 = tibble(cluster = cluster_num, 
+  nb_correlations = nb_cor, 
+  nb_unique_gene = unlist(lapply(list_edges_gene_d1, FUN = function(x) {length(unique(c(x$from, x$to)))})),
+  mean_Pearson_gene = unlist(list_mean_gene_d1),
+  Seuil = paste("Pearson cutoff = ", COR_cutoff), 
+  donor = donor, 
+  Min_cell = paste("Cell share =", minCell))
+
+```
+
+### Recap plot
+```{r Per GENE - Recap plot 1}
+
+### Plot nb of pairs of correlations
+plot = ggplot(data = df_plot_gene_d1, aes(x = cluster, y = nb_correlations)) +
+  xlab(label = "Cluster") +
+  ylab(label = "Nb correlations") +
+  scale_x_discrete(limits = c("cluster 1","cluster 2","cluster 4","cluster 3","cluster 5")) +
+  ggtitle(label = "Nombre de corrélations", subtitle = paste("Seuil Pearson & Minimu sharing cells - Donor",donor))+
+  geom_bar(stat = "identity") +
+  geom_text(aes(label  = nb_correlations), vjust = -0.25) +
+  facet_grid(Min_cell ~ Seuil, scales = "free")
+  
+plot
+
+ggsave(plot, filename = paste0(
+  "/home/romuald/Bureau/Analyses_MARS-ATAC/Diagrammes_corrélation/output/Cell", minCell,
+  "_Cutoff0",COR_cutoff*100,
+  "/plot_nb_correlations_per_GENE_Pearson_cutoff_", COR_cutoff,
+  "_MinCell_", minCell,
+  "_donor", donor,
+  ".svg"))
+
+### Plot nb of unique genes involved in pairs of correlations
+
+plot = ggplot(data = df_plot_gene_d1, aes(x = cluster, y = nb_unique_gene)) +
+  xlab(label = "Cluster") +
+  ylab(label = "Nb gène uniques impliqués dans des corrélations") +
+  scale_x_discrete(limits = c("cluster 1","cluster 2","cluster 4","cluster 3","cluster 5"))+
+  ggtitle(label = "Nombre de gènes impliqués dans le corrélatios", 
+    subtitle = paste("Donor",donor))+
+  geom_bar(stat = "identity") +
+  geom_text(aes(label  = nb_unique_gene), vjust = -0.25) +
+  facet_grid(Min_cell ~ Seuil, scales = "free")
+  
+plot
+
+ggsave(plot, filename = paste0(
+  "/home/romuald/Bureau/Analyses_MARS-ATAC/Diagrammes_corrélation/output/Cell", minCell,
+  "_Cutoff0",COR_cutoff*100,
+  "/plot_nb_unique_GENE_Pearson_cutoff_", COR_cutoff,
+  "_MinCell_", minCell,
+  "_d", donor,
+  ".svg"))
+
+### Plot the mean f Pearson indice pre cluster
+
+plot = ggplot(df_plot_gene_d1, aes(x = cluster, y = mean_Pearson_gene)) +
+  geom_bar(stat = "identity") +
+  xlab(label = "Cluster") +
+  ylab(label = "Mean Pearson coeff") +
+  scale_x_discrete(limits = c("cluster 1","cluster 2","cluster 4","cluster 3","cluster 5"))+
+  ggtitle(label = "Mean Pearson coefficient for genes",
+          subtitle = paste("Donor", donor))+
+  geom_text(aes(label  = round(mean_Pearson_gene,3)), vjust = -0.25) +
+  facet_grid(Min_cell ~ Seuil, scales = "free")
+plot
+
+ggsave(plot, filename = paste0(
+  "/home/romuald/Bureau/Analyses_MARS-ATAC/Diagrammes_corrélation/output/Cell", minCell,
+  "_Cutoff0",COR_cutoff*100,
+  "/plot_Pearson_mean_GENE_cutoff_", COR_cutoff,
+  "_MinCell_", minCell,
+  "_d", donor,
+  ".svg"))
+
+### Plot the distribution of correlations of each genes (red = mean)
+
+df_plot = rbindlist(list_df_recap_corr_gene_d1)
+df_plot$Cluster = as.factor(df_plot$Cluster)
+df_plot$Var1 = as.factor(df_plot$Var1)
+
+plot = ggplot(df_plot, aes(x = Cluster, y = nb_corr)) +
+  geom_violin() +
+  stat_summary(fun=mean, geom="point", size=2, shape = 19, color="red") +
+  ggtitle(label = "Distriburion du nombre de corrélations effectuées par gène",
+    subtitle = paste("Donor",donor))
+
+plot
+
+ggsave(plot, filename = paste0(
+  "/home/romuald/Bureau/Analyses_MARS-ATAC/Diagrammes_corrélation/output/Cell", minCell,
+  "_Cutoff0",COR_cutoff*100,
+  "/plot_distribution_nb_correlations_per_GENE_Pearson_cutoff_", COR_cutoff,
+  "_MinCell_", minCell,
+  "_d", donor,
+  ".svg"))
+
+```
+
+
+## Donneur 2
+
+## Sharing cells = 5 et Seuil 0.70
+```{r Per GENE - Tidy data and Bundle Diagram DONOR 2 - Seuil 0.70 - Min Cell 5, message=FALSE, warning=FALSE}
+
+  # For loop settings
+  cluster_num = 1:5
+  COR_cutoff = 0.70
+  minCell = 5
+  min_link = 2
+  donor = 2
+  
+  list_igraph_d2 = list()
+  list_edges_gene_d2 = list()
+  list_df_recap_corr_gene_d2 = list()
+  list_mean_gene_d2 = list()
+  
+  for(i in 1:length(cluster_num)){
+    
+    ################################################
+    ############# Correlation Matrix ###############
+    ################################################
+    
+    
+    COR = calculate_PearsCor_gene(spread_df, donor = donor, minCell = minCell, cluster = cluster_num[i])
+    diag(COR) = 0
+    COR = abs(COR)
+    
+    COR_low = lower.tri(COR)
+    COR_low = COR[COR_low] 
+     
+    dim(COR_low) = NULL
+    COR_low = COR_low[!is.na(COR_low)]
+    COR_low[COR_low < 0.5] = 0 # Tout ce qui est en dessous de 0.5 on le fixe à zéro (que pour COR_low)
+    mean_gene = mean(COR_low) 
+    
+    COR[COR<COR_cutoff] = 0 #
+
+    
+    ################################################
+    ############### EdgeBundleR ####################
+    ################################################
+    
+    cor_g <- graph_from_adjacency_matrix(COR, mode='undirected', weighted = 'correlation')
+    edges <- igraph::as_data_frame(cor_g, 'edges')
+    
+    multi_from = edges %>%
+      group_by(from) %>%
+      filter(n()> min_link-1) # min_link -1 parce que si on veut minim 2 liens avec c'est n()>1
+    
+    multi_to = edges %>%
+      group_by(to) %>%
+      filter(n()> min_link-1)
+    
+    edges = bind_rows(multi_from, multi_to) %>% distinct()
+    
+    df_recap_corr = rbind(
+      as.data.frame(table(edges$from)),
+      as.data.frame(table(edges$to))) %>%
+      group_by(Var1) %>%
+      summarise(nb_corr = sum(Freq)) %>%
+      mutate(Cluster = paste("cluster",i))
+    
+
+    write.table(unique(c(edges$from,edges$to)),
+          paste0("/home/romuald/Bureau/Analyses_MARS-ATAC/Diagrammes_corrélation/output/Cell", minCell,
+          "_Cutoff0",COR_cutoff*100,
+          "/list_gene_cluster_correlations/list_gene_cluster", cluster_num[i],
+          "_Pearson_cutoff_", COR_cutoff,
+          "_MinCell_", minCell,
+          "_donor", donor,
+          ".csv"))
+    
+    igraph = graph_from_edgelist(as.matrix(edges[,1:2]), directed = F)
+    
+    list_df_recap_corr_gene_d2[[i]] = df_recap_corr
+    list_igraph_d2[[i]] = igraph
+    list_edges_gene_d2[[i]] = edges
+    list_mean_gene_d2[[i]] = mean_gene
+    
+  }
+  
+  cat(paste("*********************************************\n"),
+    paste("************ DONNEUR", donor, "cluster", cluster_num[1],"***********\n"),
+    paste("******************************************\n"))
+  
+   paste("Il y a un total de", nrow(list_edges_gene_d2[[1]]), "corrélations entre les gènes")
+  
+    # edgebundle(list_igraph_d2[[1]],tension=0.8,fontsize = 10, nodesize = 10)
+  
+    
+    cat(paste("*********************************************\n"),
+    paste("************ DONNEUR", donor, "cluster", cluster_num[2],"***********\n"),
+    paste("******************************************\n"))
+  
+   paste("Il y a un total de",nrow(list_edges_gene_d2[[2]]), "corrélations entre les gènes")
+  
+    # edgebundle(list_igraph_d2[[2]], tension=0.8,fontsize = 10, nodesize = 10)
+    
+    cat(paste("*********************************************\n"),
+    paste("************ DONNEUR", donor, "cluster", cluster_num[3],"***********\n"),
+    paste("******************************************\n"))
+  
+   paste("Il y a un total de",nrow(list_edges_gene_d2[[3]]), "corrélations entre les gènes")
+  
+    # edgebundle(list_igraph_d2[[3]], tension=0.8,fontsize = 10, nodesize = 10)
+    
+    cat(paste("*********************************************\n"),
+    paste("************ DONNEUR", donor, "cluster", cluster_num[4],"***********\n"),
+    paste("******************************************\n"))
+  
+   paste("Il y a un total de",nrow(list_edges_gene_d2[[4]]), "corrélations entre les gènes")
+  
+    # edgebundle(list_igraph_d2[[4]], tension=0.8,fontsize = 10, nodesize = 10)
+    
+    cat(paste("*********************************************\n"),
+    paste("************ DONNEUR", donor, "cluster", cluster_num[5],"***********\n"),
+    paste("******************************************\n"))
+  
+    paste("Il y a un total de",nrow(list_edges_gene_d2[[5]]), "corrélations entre les gènes")
+  
+    # edgebundle(list_igraph_d2[[5]], tension=0.8,fontsize = 10, nodesize = 10)
+    
+# Stock nb_cor en fonction du temps et des paramètre pour plot final
+    
+nb_cor = unlist(lapply(list_edges_gene_d2, nrow))
+cluster_num = paste("cluster",1:5)
+cluster_num = as.factor(cluster_num)
+
+
+df_plot_gene_d2 = tibble(cluster = cluster_num, 
+  nb_correlations = nb_cor, 
+  nb_unique_gene = unlist(lapply(list_edges_gene_d2, FUN = function(x) {length(unique(c(x$from, x$to)))})),
+  mean_Pearson_gene = unlist(list_mean_gene_d2),
+  Seuil = paste("Pearson cutoff = ", COR_cutoff), 
+  donor = donor, 
+  Min_cell = paste("Cell share =", minCell))
+
+```
+
+
+### Recap plot
+```{r Per GENE - Recap plot 2}
+
+### Plot nb of pairs of correlations
+plot = ggplot(data = df_plot_gene_d2, aes(x = cluster, y = nb_correlations)) +
+  xlab(label = "Cluster") +
+  ylab(label = "Nb correlations") +
+  scale_x_discrete(limits = c("cluster 1","cluster 2","cluster 4","cluster 3","cluster 5")) +
+  ggtitle(label = "Nombre de corrélations", subtitle = paste("Seuil Pearson & Minimu sharing cells - Donor",donor))+
+  geom_bar(stat = "identity") +
+  geom_text(aes(label  = nb_correlations), vjust = -0.25) +
+  facet_grid(Min_cell ~ Seuil, scales = "free")
+  
+plot
+
+ggsave(plot, filename = paste0(
+  "/home/romuald/Bureau/Analyses_MARS-ATAC/Diagrammes_corrélation/output/Cell", minCell,
+  "_Cutoff0",COR_cutoff*100,
+  "/plot_nb_correlations_per_GENE_Pearson_cutoff_", COR_cutoff,
+  "_MinCell_", minCell,
+  "_donor", donor,
+  ".svg"))
+
+### Plot nb of unique genes involved in pairs of correlations
+
+plot = ggplot(data = df_plot_gene_d2, aes(x = cluster, y = nb_unique_gene)) +
+  xlab(label = "Cluster") +
+  ylab(label = "Nb gène uniques impliqués dans des corrélations") +
+  scale_x_discrete(limits = c("cluster 1","cluster 2","cluster 4","cluster 3","cluster 5"))+
+  ggtitle(label = "Nombre de gènes impliqués dans le corrélatios", 
+    subtitle = paste("Donor",donor))+
+  geom_bar(stat = "identity") +
+  geom_text(aes(label  = nb_unique_gene), vjust = -0.25) +
+  facet_grid(Min_cell ~ Seuil, scales = "free")
+  
+plot
+
+ggsave(plot, filename = paste0(
+  "/home/romuald/Bureau/Analyses_MARS-ATAC/Diagrammes_corrélation/output/Cell", minCell,
+  "_Cutoff0",COR_cutoff*100,
+  "/plot_nb_unique_GENE_Pearson_cutoff_", COR_cutoff,
+  "_MinCell_", minCell,
+  "_d", donor,
+  ".svg"))
+
+### Plot the mean f Pearson indice pre cluster
+
+plot = ggplot(df_plot_gene_d2, aes(x = cluster, y = mean_Pearson_gene)) +
+  geom_bar(stat = "identity") +
+  xlab(label = "Cluster") +
+  ylab(label = "Mean Pearson coeff") +
+  scale_x_discrete(limits = c("cluster 1","cluster 2","cluster 4","cluster 3","cluster 5"))+
+  ggtitle(label = "Mean Pearson coefficient for genes",
+          subtitle = paste("Donor", donor))+
+  geom_text(aes(label  = round(mean_Pearson_gene,3)), vjust = -0.25) +
+  facet_grid(Min_cell ~ Seuil, scales = "free")
+plot
+
+ggsave(plot, filename = paste0(
+  "/home/romuald/Bureau/Analyses_MARS-ATAC/Diagrammes_corrélation/output/Cell", minCell,
+  "_Cutoff0",COR_cutoff*100,
+  "/plot_Pearson_mean_GENE_cutoff_", COR_cutoff,
+  "_MinCell_", minCell,
+  "_d", donor,
+  ".svg"))
+
+### Plot the distribution of correlations of each genes (red = mean)
+
+df_plot = rbindlist(list_df_recap_corr_gene_d2)
+df_plot$Cluster = as.factor(df_plot$Cluster)
+df_plot$Var1 = as.factor(df_plot$Var1)
+
+plot = ggplot(df_plot, aes(x = Cluster, y = nb_corr)) +
+  geom_violin() +
+  stat_summary(fun=mean, geom="point", size=2, shape = 19, color="red") +
+  ggtitle(label = "Distriburion du nombre de corrélations effectuées par gène",
+    subtitle = paste("Donor",donor))
+
+plot
+
+ggsave(plot, filename = paste0(
+  "/home/romuald/Bureau/Analyses_MARS-ATAC/Diagrammes_corrélation/output/Cell", minCell,
+  "_Cutoff0",COR_cutoff*100,
+  "/plot_distribution_nb_correlations_per_GENE_Pearson_cutoff_", COR_cutoff,
+  "_MinCell_", minCell,
+  "_d", donor,
+  ".svg"))
+
+```
+
+  
+# Corrélations par !!! CELLULES !!!
+  
+## Donneur 1 
+\
+**Paramètres fixes :**\
+
+- Nombre de cellules minimum qui partagent le gène pour qu'il soit pris en compte = **5**\
+==> J'ai appliqué le même treshold que pour l'analyse par gène pour que ce soit bien les mêmes gènes par cluster qui soient pris en compte pour les deux analyses\
+
+- Nombre de liens minimum dont la cellule doit être la "cible" ou bien "cibler" = **1**\
+==> Contrairement à l'analyse "par gène" deux cellules (sur un total de moins de 100 par cluster) qui corrèlent a plus de sens que 2 gènes. D'où le fait que même les cellules avec un seul lien sont prises en compte ici.
+
+
+## Sharing cells = 5 et Seuil 0.7
+```{r Per CELL - Tidy data and Bundle Diagram DONOR 1 - Seuil 0.70 - Min Cell 5, message=FALSE, warning=FALSE}
+
+  # For loop settings
+  cluster_num = 1:5
+  COR_cutoff = 0.70
+  minCell = 5
+  min_link = 1 
+  donor = 1
+  
+  list_igraph_cell_d1 = list()
+  list_edges_cell_d1 = list()
+  list_df_recap_corr_cell_d1 = list()
+  list_mean_cell_d1 = list()
+  
+  for(i in 1:length(cluster_num)){
+    
+    ################################################
+    ############# Correlation Matrix ###############
+    ################################################
+    
+    COR = calculate_PearsCor_cell(spread_df, donor = donor, minCell = minCell, cluster = cluster_num[i])
+    diag(COR) = 0
+    COR = abs(COR)
+    
+    COR_low = lower.tri(COR)
+    COR_low = COR[COR_low] 
+     
+    dim(COR_low) = NULL
+    COR_low = COR_low[!is.na(COR_low)]
+    COR_low[COR_low < 0.5] = 0 # Tout ce qui est en dessous de 0.5 on le fixe à zéro (que pour COR_low)
+    mean_cell = mean(COR_low) 
+    
+    COR[COR<COR_cutoff] = 0
+    
+    ################################################
+    ############### EdgeBundleR ####################
+    ################################################
+    
+    cor_g <- graph_from_adjacency_matrix(COR, mode='undirected', weighted = 'correlation')
+    edges <- igraph::as_data_frame(cor_g, 'edges')
+    
+    multi_from = edges %>%
+      group_by(from) %>%
+      filter(n()> min_link-1) # min_link -1 parce que si on veut minim 2 liens avec c'est n()>1
+    
+    multi_to = edges %>%
+      group_by(to) %>%
+      filter(n()> min_link-1)
+    
+    edges = bind_rows(multi_from, multi_to) %>% distinct()
+    
+    df_recap_corr = rbind(
+      as.data.frame(table(edges$from)),
+      as.data.frame(table(edges$to))) %>%
+      group_by(Var1) %>%
+      summarise(nb_corr = sum(Freq)) %>%
+      mutate(Cluster = paste("cluster",i))
+    
+        write.table(unique(c(edges$from,edges$to)),
+          paste0("/home/romuald/Bureau/Analyses_MARS-ATAC/Diagrammes_corrélation/output/Cell", minCell,
+          "_Cutoff0",COR_cutoff*100,
+          "/list_cell_cluster_correlations/list_cell_cluster", cluster_num[i],
+          "_Pearson_cutoff_", COR_cutoff,
+          "_MinCell_", minCell,
+          "_donor", donor,
+          ".csv"))
+  
+    igraph = graph_from_edgelist(as.matrix(edges[,1:2]), directed = F)
+    
+    list_df_recap_corr_cell_d1[[i]] = df_recap_corr
+    list_igraph_cell_d1[[i]] = igraph
+    list_edges_cell_d1[[i]] = edges
+    list_mean_cell_d1[[i]] = mean_cell
+    
+  }
+  
+  cat(paste("Gènes pris en compte pour le calcul de corrélation : partagés par au moins", minCell, "cellules\n"),
+    paste("Seuil de corrélation Pearson : <",COR_cutoff,"\n"),
+    paste("Pour qu'une cellule soit affichée elle doit cibler ou être la cible d'au moins",min_link,"cellules\n\n"))
+  
+
+  cat(paste("*********************************************\n"),
+    paste("************ DONNEUR", donor, "cluster", cluster_num[1],"***********\n"),
+    paste("******************************************\n"))
+  
+   paste("Il y a un total de", nrow(list_edges_cell_d1[[1]]), "corrélations entre les cellules")
+  
+    edgebundle(list_igraph_cell_d1[[1]],tension=0.8,fontsize = 10, nodesize = 10)
+  
+    
+    cat(paste("*********************************************\n"),
+    paste("************ DONNEUR", donor, "cluster", cluster_num[2],"***********\n"),
+    paste("******************************************\n"))
+  
+   paste("Il y a un total de",nrow(list_edges_cell_d1[[2]]), "corrélations entre les cellules")
+  
+    edgebundle(list_igraph_cell_d1[[2]], tension=0.8,fontsize = 10, nodesize = 10)
+    
+    cat(paste("*********************************************\n"),
+    paste("************ DONNEUR", donor, "cluster", cluster_num[3],"***********\n"),
+    paste("******************************************\n"))
+  
+   paste("Il y a un total de",nrow(list_edges_cell_d1[[3]]), "corrélations entre les cellules")
+  
+   edgebundle(list_igraph_cell_d1[[3]], tension=0.8,fontsize = 10, nodesize = 10)
+    
+   cat(paste("*********************************************\n"),
+   paste("************ DONNEUR", donor, "cluster", cluster_num[4],"***********\n"),
+   paste("******************************************\n"))
+  
+   paste("Il y a un total de",nrow(list_edges_cell_d1[[4]]), "corrélations entre les cellules")
+  
+    edgebundle(list_igraph_cell_d1[[4]], tension=0.8,fontsize = 10, nodesize = 10)
+    
+    cat(paste("*********************************************\n"),
+    paste("************ DONNEUR", donor, "cluster", cluster_num[5],"***********\n"),
+    paste("******************************************\n"))
+  
+    paste("Il y a un total de",nrow(list_edges_cell_d1[[5]]), "corrélations entre les cellules")
+  
+    edgebundle(list_igraph_cell_d1[[5]], tension=0.8,fontsize = 10, nodesize = 10)
+    
+# Stock nb_cor en fonction du temps et des paramètre pour plot final
+    
+nb_cor = unlist(lapply(list_edges_cell_d1, nrow))
+cluster_num = paste("cluster",1:5)
+cluster_num = as.factor(cluster_num)
+
+df_plot_cell_d1 = tibble(cluster = cluster_num, 
+  nb_correlations = nb_cor, 
+  mean_Pearson_cell = unlist(list_mean_cell_d1),
+  nb_unique_cell = unlist(lapply(list_edges_cell_d1, FUN = function(x) {length(unique(c(x$from, x$to)))})),
+  Seuil = paste("Pearson cutoff = ", COR_cutoff), 
+  donor = donor, 
+  Min_cell = paste("Cell share =", minCell))
+
+```
+
+### Recap plot
+```{r Per CELL - Recap plot 1}
+
+### Plot nb of pairs of correlations
+plot = ggplot(data = df_plot_cell_d1, aes(x = cluster, y = nb_correlations)) +
+  xlab(label = "Cluster") +
+  ylab(label = "Nb_correlations") +
+  scale_x_discrete(limits = c("cluster 1","cluster 2","cluster 4","cluster 3","cluster 5")) +
+  ggtitle(label = "Nombre de corrélations entre les cellules", subtitle = paste("Seuil Pearson & Minimu sharing cells - Donor",donor))+
+  geom_bar(stat = "identity") +
+  geom_text(aes(label  = nb_correlations), vjust = -0.25) +
+  facet_grid(Min_cell ~ Seuil, scales = "free")
+  
+plot
+
+ggsave(plot, filename = paste0(
+  "/home/romuald/Bureau/Analyses_MARS-ATAC/Diagrammes_corrélation/output/Cell", minCell,
+  "_Cutoff0",COR_cutoff*100,
+  "/plot_nb_correlations_per_CELL_Pearson_cutoff_", COR_cutoff,
+  "_MinCell_", minCell,
+  "_donor", donor,
+  ".svg"))
+
+### Plot nb of unique genes involved in pairs of correlations
+
+plot = ggplot(data = df_plot_cell_d1, aes(x = cluster, y = nb_unique_cell)) +
+  xlab(label = "Cluster") +
+  ylab(label = "Nb correlations") +
+  scale_x_discrete(limits = c("cluster 1","cluster 2","cluster 4","cluster 3","cluster 5"))+
+  ggtitle(label = "Nombre de cellules impliquées dans le corrélations", 
+    subtitle = paste("Donor",donor))+
+  geom_bar(stat = "identity") +
+  geom_text(aes(label  = nb_unique_cell), vjust = -0.25) +
+  facet_grid(Min_cell ~ Seuil, scales = "free")
+  
+plot
+
+ggsave(plot, filename = paste0(
+  "/home/romuald/Bureau/Analyses_MARS-ATAC/Diagrammes_corrélation/output/Cell", minCell,
+  "_Cutoff0",COR_cutoff*100,
+  "/plot_nb_unique_CELL_Pearson_cutoff_", COR_cutoff,
+  "_MinCell_", minCell,
+  "_d", donor,
+  ".svg"))
+
+### Plot the mean f Pearson indice pre cluster
+
+plot = ggplot(df_plot_cell_d1, aes(x = cluster, y = mean_Pearson_cell)) +
+  geom_bar(stat = "identity") +
+  xlab(label = "Cluster") +
+  ylab(label = "Mean Perosn coeff") +
+  scale_x_discrete(limits = c("cluster 1","cluster 2","cluster 4","cluster 3","cluster 5"))+
+  ggtitle(label = "Mean Pearson coefficient for cells",
+          subtitle = paste("Donor", donor))+
+  geom_text(aes(label  = round(mean_Pearson_cell,3)), vjust = -0.25) +
+  facet_grid(Min_cell ~ Seuil, scales = "free")
+plot
+
+ggsave(plot, filename = paste0(
+  "/home/romuald/Bureau/Analyses_MARS-ATAC/Diagrammes_corrélation/output/Cell", minCell,
+  "_Cutoff0",COR_cutoff*100,
+  "/plot_Pearson_mean_CELL_cutoff_", COR_cutoff,
+  "_MinCell_", minCell,
+  "_d", donor,
+  ".svg"))
+
+### Plot the distribution of correlations of each genes (red = mean)
+
+df_plot = rbindlist(list_df_recap_corr_cell_d1)
+df_plot$Cluster = as.factor(df_plot$Cluster)
+df_plot$Var1 = as.factor(df_plot$Var1)
+
+plot = ggplot(df_plot, aes(x = Cluster, y = nb_corr)) +
+  geom_violin() +
+  stat_summary(fun=mean, geom="point", size=2, shape = 19, color="red") +
+  ggtitle(label = "Distriburion du nombre de corrélations effectuées par cellules",
+    subtitle = paste("Donor",donor))
+
+plot
+
+ggsave(plot, filename = paste0(
+  "/home/romuald/Bureau/Analyses_MARS-ATAC/Diagrammes_corrélation/output/Cell", minCell,
+  "_Cutoff0",COR_cutoff*100,
+  "/plot_distribution_nb_correlations_per_CELL_Pearson_cutoff_", COR_cutoff,
+  "_MinCell_", minCell,
+  "_d", donor,
+  ".svg"))
+
+```
+
+  
+## Donneur 2
+
+## Sharing cells = 5 et Seuil 0.7
+```{r Per CELL - Tidy data and Bundle Diagram DONOR 2 - Seuil 0.70 - Min Cell 5, message=FALSE, warning=FALSE}
+
+  # For loop settings
+  cluster_num = 1:5
+  COR_cutoff = 0.70
+  minCell = 5
+  min_link = 1 
+  donor = 2
+  
+  list_igraph_cell_d2 = list()
+  list_edges_cell_d2 = list()
+  list_df_recap_corr_cell_d2 = list()
+  list_mean_cell_d2 = list()
+  
+  for(i in 1:length(cluster_num)){
+    
+    ################################################
+    ############# Correlation Matrix ###############
+    ################################################
+    
+    COR = calculate_PearsCor_cell(spread_df, donor = donor, minCell = minCell, cluster = cluster_num[i])
+    diag(COR) = 0
+    COR = abs(COR)
+    
+    COR_low = lower.tri(COR)
+    COR_low = COR[COR_low] 
+     
+    dim(COR_low) = NULL
+    COR_low = COR_low[!is.na(COR_low)]
+    COR_low[COR_low < 0.5] = 0 # Tout ce qui est en dessous de 0.5 on le fixe à zéro (que pour COR_low)
+    mean_cell = mean(COR_low) 
+    
+    COR[COR<COR_cutoff] = 0
+    
+    ################################################
+    ############### EdgeBundleR ####################
+    ################################################
+    
+    cor_g <- graph_from_adjacency_matrix(COR, mode='undirected', weighted = 'correlation')
+    edges <- igraph::as_data_frame(cor_g, 'edges')
+    
+    multi_from = edges %>%
+      group_by(from) %>%
+      filter(n()> min_link-1) # min_link -1 parce que si on veut minim 2 liens avec c'est n()>1
+    
+    multi_to = edges %>%
+      group_by(to) %>%
+      filter(n()> min_link-1)
+    
+    edges = bind_rows(multi_from, multi_to) %>% distinct()
+    
+    df_recap_corr = rbind(
+      as.data.frame(table(edges$from)),
+      as.data.frame(table(edges$to))) %>%
+      group_by(Var1) %>%
+      summarise(nb_corr = sum(Freq)) %>%
+      mutate(Cluster = paste("cluster",i))
+    
+        write.table(unique(c(edges$from,edges$to)),
+          paste0("/home/romuald/Bureau/Analyses_MARS-ATAC/Diagrammes_corrélation/output/Cell", minCell,
+          "_Cutoff0",COR_cutoff*100,
+          "/list_cell_cluster_correlations/list_cell_cluster", cluster_num[i],
+          "_Pearson_cutoff_", COR_cutoff,
+          "_MinCell_", minCell,
+          "_donor", donor,
+          ".csv"))
+  
+    igraph = graph_from_edgelist(as.matrix(edges[,1:2]), directed = F)
+    
+    list_df_recap_corr_cell_d2[[i]] = df_recap_corr
+    list_igraph_cell_d2[[i]] = igraph
+    list_edges_cell_d2[[i]] = edges
+    list_mean_cell_d2[[i]] = mean_cell
+    
+  }
+  
+  cat(paste("Gènes pris en compte pour le calcul de corrélation : partagés par au moins", minCell, "cellules\n"),
+    paste("Seuil de corrélation Pearson : <",COR_cutoff,"\n"),
+    paste("Pour qu'une cellule soit affichée elle doit cibler ou être la cible d'au moins",min_link,"cellules\n\n"))
+  
+
+  cat(paste("*********************************************\n"),
+    paste("************ DONNEUR", donor, "cluster", cluster_num[1],"***********\n"),
+    paste("******************************************\n"))
+  
+   paste("Il y a un total de", nrow(list_edges_cell_d2[[1]]), "corrélations entre les cellules")
+  
+    edgebundle(list_igraph_cell_d2[[1]],tension=0.8,fontsize = 10, nodesize = 10)
+  
+    
+    cat(paste("*********************************************\n"),
+    paste("************ DONNEUR", donor, "cluster", cluster_num[2],"***********\n"),
+    paste("******************************************\n"))
+  
+   paste("Il y a un total de",nrow(list_edges_cell_d2[[2]]), "corrélations entre les cellules")
+  
+    edgebundle(list_igraph_cell_d2[[2]], tension=0.8,fontsize = 10, nodesize = 10)
+    
+    cat(paste("*********************************************\n"),
+    paste("************ DONNEUR", donor, "cluster", cluster_num[3],"***********\n"),
+    paste("******************************************\n"))
+  
+   paste("Il y a un total de",nrow(list_edges_cell_d2[[3]]), "corrélations entre les cellules")
+  
+   edgebundle(list_igraph_cell_d2[[3]], tension=0.8,fontsize = 10, nodesize = 10)
+    
+   cat(paste("*********************************************\n"),
+   paste("************ DONNEUR", donor, "cluster", cluster_num[4],"***********\n"),
+   paste("******************************************\n"))
+  
+   paste("Il y a un total de",nrow(list_edges_cell_d2[[4]]), "corrélations entre les cellules")
+  
+    edgebundle(list_igraph_cell_d2[[4]], tension=0.8,fontsize = 10, nodesize = 10)
+    
+    cat(paste("*********************************************\n"),
+    paste("************ DONNEUR", donor, "cluster", cluster_num[5],"***********\n"),
+    paste("******************************************\n"))
+  
+    paste("Il y a un total de",nrow(list_edges_cell_d2[[5]]), "corrélations entre les cellules")
+  
+    edgebundle(list_igraph_cell_d2[[5]], tension=0.8,fontsize = 10, nodesize = 10)
+    
+# Stock nb_cor en fonction du temps et des paramètre pour plot final
+    
+nb_cor = unlist(lapply(list_edges_cell_d2, nrow))
+cluster_num = paste("cluster",1:5)
+cluster_num = as.factor(cluster_num)
+
+df_plot_cell_d2 = tibble(cluster = cluster_num, 
+  nb_correlations = nb_cor, 
+  mean_Pearson_cell = unlist(list_mean_cell_d2),
+  nb_unique_cell = unlist(lapply(list_edges_cell_d2, FUN = function(x) {length(unique(c(x$from, x$to)))})),
+  Seuil = paste("Pearson cutoff = ", COR_cutoff), 
+  donor = donor, 
+  Min_cell = paste("Cell share =", minCell))
+
+```
+
+### Recap plot
+```{r Per CELL - Recap plot 2}
+
+### Plot nb of pairs of correlations
+plot = ggplot(data = df_plot_cell_d2, aes(x = cluster, y = nb_correlations)) +
+  xlab(label = "Cluster") +
+  ylab(label = "Nb correlations") +
+  scale_x_discrete(limits = c("cluster 1","cluster 2","cluster 4","cluster 3","cluster 5")) +
+  ggtitle(label = "Nombre de corrélations", subtitle = paste("Seuil Pearson & Minimu sharing cells - Donor",donor))+
+  geom_bar(stat = "identity") +
+  geom_text(aes(label  = nb_correlations), vjust = -0.25) +
+  facet_grid(Min_cell ~ Seuil, scales = "free")
+  
+plot
+
+ggsave(plot, filename = paste0(
+  "/home/romuald/Bureau/Analyses_MARS-ATAC/Diagrammes_corrélation/output/Cell", minCell,
+  "_Cutoff0",COR_cutoff*100,
+  "/plot_nb_correlations_per_CELL_Pearson_cutoff_", COR_cutoff,
+  "_MinCell_", minCell,
+  "_donor", donor,
+  ".svg"))
+
+### Plot nb of unique genes involved in pairs of correlations
+
+plot = ggplot(data = df_plot_cell_d2, aes(x = cluster, y = nb_unique_cell)) +
+  xlab(label = "Cluster") +
+  ylab(label = "Nb corrélations") +
+  scale_x_discrete(limits = c("cluster 1","cluster 2","cluster 4","cluster 3","cluster 5"))+
+  ggtitle(label = "Nombre de cellules impliquées dans les corrélations", 
+    subtitle = paste("Donor",donor))+
+  geom_bar(stat = "identity") +
+  geom_text(aes(label  = nb_unique_cell), vjust = -0.25) +
+  facet_grid(Min_cell ~ Seuil, scales = "free")
+  
+plot
+
+ggsave(plot, filename = paste0(
+  "/home/romuald/Bureau/Analyses_MARS-ATAC/Diagrammes_corrélation/output/Cell", minCell,
+  "_Cutoff0",COR_cutoff*100,
+  "/plot_nb_unique_CELL_Pearson_cutoff_", COR_cutoff,
+  "_MinCell_", minCell,
+  "_d", donor,
+  ".svg"))
+
+### Plot the mean f Pearson indice pre cluster
+
+plot = ggplot(df_plot_cell_d2, aes(x = cluster, y = mean_Pearson_cell)) +
+  geom_bar(stat = "identity") +
+  xlab(label = "Cluster") +
+  ylab(label = "Mean Pearson coeff") +
+  scale_x_discrete(limits = c("cluster 1","cluster 2","cluster 4","cluster 3","cluster 5"))+
+  ggtitle(label = "Mean Pearson coefficient for cells",
+          subtitle = paste("Donor", donor))+
+  geom_text(aes(label  = round(mean_Pearson_cell,3)), vjust = -0.25) +
+  facet_grid(Min_cell ~ Seuil, scales = "free")
+plot
+
+ggsave(plot, filename = paste0(
+  "/home/romuald/Bureau/Analyses_MARS-ATAC/Diagrammes_corrélation/output/Cell", minCell,
+  "_Cutoff0",COR_cutoff*100,
+  "/plot_Pearson_mean_CELL_Pearson_cutoff_", COR_cutoff,
+  "_MinCell_", minCell,
+  "_d", donor,
+  ".svg"))
+
+### Plot the distribution of correlations of each genes (red = mean)
+
+df_plot = rbindlist(list_df_recap_corr_cell_d2)
+df_plot$Cluster = as.factor(df_plot$Cluster)
+df_plot$Var1 = as.factor(df_plot$Var1)
+
+plot = ggplot(df_plot, aes(x = Cluster, y = nb_corr)) +
+  geom_violin() +
+  stat_summary(fun=mean, geom="point", size=2, shape = 19, color="red") +
+  ggtitle(label = "Distriburion du nombre de corrélations effectuées par cellules",
+    subtitle = paste("Donor",donor))
+
+plot
+
+ggsave(plot, filename = paste0(
+  "/home/romuald/Bureau/Analyses_MARS-ATAC/Diagrammes_corrélation/output/Cell", minCell,
+  "_Cutoff0",COR_cutoff*100,
+  "/plot_distribution_nb_correlations_per_CELL_Pearson_cutoff_", COR_cutoff,
+  "_MinCell_", minCell,
+  "_d", donor,
+  ".svg"))
+
+```
+
+```{r}
+
+df_all_d1 = left_join(df_plot_cell_d1, df_plot_gene_d1, by = c("cluster", "Min_cell","donor","Seuil"))
+df_all_d1 = df_all_d1 %>% mutate(IC = mean_Pearson_gene/mean_Pearson_cell)
+
+plot = ggplot(df_all_d1, aes(x = cluster, y = IC)) +
+  geom_bar(stat = "identity") +
+  xlab(label = "Cluster") +
+  ylab(label = "IC") +
+  scale_x_discrete(limits = c("cluster 1","cluster 2","cluster 4","cluster 3","cluster 5"))+
+  ggtitle(label = "Bifurcation indice",
+          subtitle = paste("Donor", donor))+
+  geom_text(aes(label  = round(IC,3)), vjust = -0.25) +
+  facet_grid(Min_cell ~ Seuil, scales = "free")
+
+plot
+
+ggsave(plot, filename = paste0(
+  "/home/romuald/Bureau/Analyses_MARS-ATAC/Diagrammes_corrélation/output/Cell", minCell,
+  "_Cutoff0",COR_cutoff*100,
+  "/plot_IC", COR_cutoff,
+  "_MinCell_", minCell,
+  "_d1.svg"))
+  
+df_all_d2 = left_join(df_plot_cell_d2, df_plot_gene_d2, by = c("cluster", "Min_cell","donor","Seuil"))
+df_all_d2 = df_all_d2 %>% mutate(IC = mean_Pearson_gene/mean_Pearson_cell)
+
+
+plot = ggplot(df_all_d2, aes(x = cluster, y = IC)) +
+  geom_bar(stat = "identity") +
+  xlab(label = "Cluster") +
+  ylab(label = "IC") +
+  scale_x_discrete(limits = c("cluster 1","cluster 2","cluster 4","cluster 3","cluster 5"))+
+  ggtitle(label = "Bifurcation indice",
+          subtitle = paste("Donor", donor))+
+  geom_text(aes(label  = round(IC,3)), vjust = -0.25) +
+  facet_grid(Min_cell ~ Seuil, scales = "free")
+
+plot
+
+ggsave(plot, filename = paste0(
+  "/home/romuald/Bureau/Analyses_MARS-ATAC/Diagrammes_corrélation/output/Cell", minCell,
+  "_Cutoff0",COR_cutoff*100,
+  "/plot_IC", COR_cutoff,
+  "_MinCell_", minCell,
+  "_d2.svg"))
+
+```
+
+  
+
+

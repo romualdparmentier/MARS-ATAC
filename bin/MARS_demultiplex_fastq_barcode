@@ -1,0 +1,134 @@
+### scRNAseq using UMI tools
+### GC march 13th, 2019
+### Revision 09/07/20 LR RP : only for demultiplexing ###
+
+
+# Installation de umi_tools :
+# pip install git+https://github.com/CGATOxford/UMI-tools@{TS}-ignore-read-pair-suffixes
+
+import os
+import re
+from glob import glob
+from snakemake.io import expand, glob_wildcards
+
+NAME = ['00Hrs','24Hrs', '48Hrs', '72Hrs', '96Hrs']
+FILES = glob('data/*_R1_CC9HDACXX.fastq.gz')                        # ex :  data/Ech1_R1.fastq
+TEMP = [re.sub('_R1_CC9HDACXX.fastq.gz','',w) for w in FILES];      # ex : data/Ech1
+SAMPLE = [re.sub('data/','', x) for x in TEMP]         # ex : Ech1
+# re.sub() replace with regular expression
+# specify a regular expression pattern in the first argument ('.fastq.gz')
+# a new string in the second argument ('')
+# and a string to be processed in the third argument (w)
+# here SAMPLE : every file in FILES ending with '.fastq.gz' will be ending by noting
+# we only kept the file name without the extension
+
+rule all:
+    input : expand("results/{sample}/{sample}_R1_extracted_BCC_demultiplex_BCP_{name}.fastq.gz", sample = SAMPLE, name = NAME),
+            expand("results/{sample}/{sample}_R2_extracted_BCC_demultiplex_BCP_{name}.fastq.gz", sample = SAMPLE, name = NAME)
+
+
+#################################################################################
+# STEP 1 : Identifying the real cells thanks to their barcode cells (whitelist)
+#################################################################################
+
+# ######################
+# # Rule to create the whitelist from the datas : taking the top X most abundant barcodes
+# ######################
+# rule UMI_whitelist:
+#  input: r1="{sample}_R1.fastq",
+#         r2="{sample}_R2.fastq"
+#  output: "{sample}/whitelist.txt"
+#  shell: """
+#        umi_tools whitelist \
+#        --stdin {input.r1} \
+#        --read2-in {input.r2} \
+#        --bc-pattern=XXXX \
+#        --bc-pattern2=CCCCCCNNNN \
+#        --set-cell-number 96 \
+#        --extract-method=string \
+#        -S {output}
+#         """
+
+# Options explications :
+       # --stdin {input.r1} \                          # files that contain the barcodes plates (read1)
+       # --read2-in {input.r2} \                       # because it's paired end
+       #  by default the barcodes are at the 5' end of the read
+       # --bc-pattern=XXXX \                           # barcode plate position in read 1
+       # --bc-pattern2=CCCCCCNNNN \                    # C represents barcode cell position and N represents UMI position in read 2
+       # --set-cell-number 96 \                        # 96 cells so we are looking for 96 barcodes cells
+       # --extract-method=string \                     # indicate the format of --bc-pattern
+       # --plot-prefix {wildcards.sample}/logs/plot \    # to visualise the set of thresholds considered for defining cell barcodes
+       # -S {output} \                                 # redirect the final output to a defined file
+
+# Here we will use an existing whitelist containing the list of barcode plates
+rule extract_BCC:
+    input : r1= "data/{sample}_R1_CC9HDACXX.fastq.gz",
+            r2= "data/{sample}_R2_CC9HDACXX.fastq.gz",
+            whitelist = "data/tags/tagsBCC.txt"
+    output: r1= "results/{sample}/{sample}_R1_extracted_BCC.fastq.gz", # BCC = BarCode Cell
+            r2= "results/{sample}/{sample}_R2_extracted_BCC.fastq.gz"
+    conda : "UMI_tools_env.yaml"
+    shell: """
+            umi_tools extract \
+            --extract-method=string \
+            --bc-pattern=XXXX \
+            --bc-pattern2=CCCCCCNNNN \
+            --stdin {input.r1} \
+            --stdout {output.r1} \
+            --read2-in {input.r2} \
+            --read2-out {output.r2} \
+            --filter-cell-barcode \
+            --whitelist={input.whitelist} \
+            --ignore-read-pair-suffixes
+           """
+# Options explications :
+# --extract-method=string           # indicate the format of --bc-pattern
+# --bc-pattern=XXXX                 # barcode plate position in read 1
+# --bc-pattern2=CCCCCCNNNN          # barcode cell and UMI position in read 2
+# --stdin {input.r1}                # files that contain the barcodes plates (read1)
+# --stdout {output.r1}
+# --read2-in {input.r2}             # file name of read 2 (because paired ends)
+# --read2-out {output.r2}
+# --filter-cell-barcode             # to filter cells depending on the whitelist
+# --whitelist={input.whitelist}     # user-supplied whitelist
+# --read-name-suffix-strip          # strip the suffixes from the read names before the check they are identical.
+# -L {log}                          # redirect the log to a defined file
+# --error-correct-cell              # correct barcodes upon the whitelist propositions
+
+
+##################################################################
+# STEP 2 : Separate real cells according to their barcode plate
+##################################################################
+
+rule demultiplex_BCP:
+    input : r1= "results/{sample}/{sample}_R1_extracted_BCC.fastq.gz",
+            r2= "results/{sample}/{sample}_R2_extracted_BCC.fastq.gz"
+    output :"results/{sample}/{sample}_R1_extracted_BCC_demultiplex_BCP_{name}.fastq.gz",
+            "results/{sample}/{sample}_R2_extracted_BCC_demultiplex_BCP_{name}.fastq.gz"
+    conda : "UMI_tools_env.yaml"
+    shell : """
+        cutadapt -q 30,30 \
+                  -e 0 \
+                 --discard-untrimmed \
+                  --no-indels \
+                  -g file:data/tags/tagsBCP.txt \
+                  -m 30:20 \
+                  --pair-filter=any \
+                  -y '{{name}}' \
+                  -o results/{wildcards.sample}/{wildcards.sample}_R1_extracted_BCC_demultiplex_BCP_{{name}}.fastq.gz \
+                  -p results/{wildcards.sample}/{wildcards.sample}_R2_extracted_BCC_demultiplex_BCP_{{name}}.fastq.gz \
+                   {input.r1} {input.r2}
+"""
+
+# Options explications :
+# -q 30,30                      # Phred score = 1/1000 error rate
+# -e 0                          # maximum error rate
+# --discard-untrimmed           # Discard reads in which no adapter was found
+# --no-indels
+# -g file:tags.fa              # file containing barcodes plate
+# -m 30:20                     # -m LENGTH : Discard processed reads that are shorter than LENGTH.
+# --pair-filter=any            # a read pair is discarded (or redirected) if one of the reads (R1 or R2) fulfills the filtering criterion
+# -y  '{{name}}'               # -y to append a text to read names  # {{name}} : double bracket to indicate it's not a wildcard, it goes with -y option
+# -o results/{wildcards.sample}/{wildcards.sample}_R1_extracted_BCC_demultiplex_BCP_{{name}}.fastq  # output read 1
+# -p results/{wildcards.sample}/{wildcards.sample}_R2_extracted_BCC_demultiplex_BCP_{{name}}.fastq  # output read 2
+# {input.r1} {input.r2}

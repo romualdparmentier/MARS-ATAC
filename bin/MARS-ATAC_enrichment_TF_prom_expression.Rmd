@@ -1,0 +1,2737 @@
+---
+title: "Comparaison MARS-ATAC 05h vs 24h"
+subtitle : ""
+author: "Romuald Parmentier"
+date: "22/04/2021"
+output: 
+  html_document:
+    code_folding: hide
+    df_print: kable
+    highlight: default
+    number_sections: yes
+    theme: journal  
+    toc: yes
+    toc_depth: 3
+    toc_float:
+      collapsed: no
+      smooth_scroll: yes
+---
+
+<style>
+body {text-align: justify}
+div.grey {background-color:#f3f3f3; border-radius: 5px; padding: 20px;}
+.col2 {
+    columns: 2 200px;         /* number of columns and width in pixels*/
+    -webkit-columns: 2 200px; /* chrome, safari */
+    -moz-columns: 2 200px;    /* firefox */
+  }
+</style>
+
+<font size="3.5">
+
+```{css, echo = FALSE}
+caption {
+      color: black;
+      font-weight: bold;
+      font-size: 1.0em;
+    }
+```
+
+```{r setup markdown, include=FALSE}
+# Paramètres uniquement utilisés pour le Rmarkdown, non indispensable au code R de base
+library(kableExtra)  
+```
+
+
+
+<br><br><br> <!--Pour avoir un espace entre les grandes parties-->
+
+**********************************************************************************************************
+
+Ce script a pour but de présenter et de comprendre les résultats obtenus pour l'analyse MARS ATAC à partir des scripts de Ravi. \
+Le data set avec lequel nous travaillons finalement est : Spread_MARSseq_data_all_filters_20200728.csv. Ce dernier comprend tous les filtres appliqués sur les UMI, les reads...etc (cf. nom du script : ) \
+
+
+<div class = "grey">
+**- Chargement des packages utiles pour le code**
+```{r package and functions,message=F, warning=F, eval=T}
+
+library(tidyverse)
+#library(biomaRt)
+
+```
+**- Définition de l'environnement de travail et chargement des données d'entrée**
+```{r working directory and data input, eval=T}
+working_directory = "/home/romuald/Bureau/Analyses_MARS-ATAC/TF_vs_Prom_vs_Expr_redo/"
+# working_directory = "/home/lracine/Bureau/data_fantom"
+setwd(working_directory)
+
+z_cutoff = 2 
+
+# Ancienne table de données
+# expression_data <- read.csv2("old_expression_data.csv")# Structure à copier avec nos nouvelles data
+
+# Nouvelle table de données : version "large" de nos données
+# 826 lignes (pour 826 cellules au total) et 14049 colonnes (pour 14049 gènes détectés en tout)
+Spread_MARSseq_data_all_filters_20200728 <- read.csv("input_files/Spread_MARSseq_data_all_filters_20200728.csv", dec = ",")
+
+```
+</div>
+
+**********************************************************************************************************
+
+<br><br><br> <!--Pour avoir un espace entre les grandes parties-->
+
+
+
+# .Reconstruction de la table de donnée compatible avec le script de Ravi 
+
+\
+Cette première partie permet de recréer la bonne structure de tableau avec nos données d'entrées pour pouvoir les injecter dans le script initial de Ravi. En effet, toutes les informations sont présentes mais pas ordonnées de la bonne façon et certaines données statistiques nécessitent d'être calculées. \
+==> Le code ne se lance pas ici (eval = FALSE) car il est plutôt long.  \
+==> Les objets qu'il génère ont donc été stockés dans le dossier de travail et ils seront chargés pour la suite du code. \
+\
+
+<div class = "grey">
+**- Output 1 : symbol_entrez_df.rda => Correspondance entre les noms de gènes (symbol) et les id_entrez** 
+```{r Gene data base info retrieval, eval = FALSE, warning=FALSE}
+
+# On récupère les id (entrez) de la base de donnée grâce à Biomart
+mart <- useMart(biomart = "ensembl", dataset = "hsapiens_gene_ensembl")
+genes = biomaRt::getBM(attributes = c("hgnc_symbol", "entrezgene_id"), mart = mart)
+colnames(genes)= c("symbol","ENTREZID")
+
+# Problème : il y a des dupliquats de noms de gènes avec des id différents et des id sans gènes associés
+
+# On créé une liste avec tous les gènes (symbol) et en value les indices de la ligne où ils se trouvent dans le df
+indices_rep = lapply(split(genes, list(genes$symbol), drop=TRUE), row.names)
+
+# Petit recap du nombre de gènes concernés par ces répétitons
+nb_of_repreat = lapply(indices_rep,length) # 196 gènes ont entre 2 et 7 entrez_id et 1096 entrez_id n'ont pas de gène
+ordered_nb_of_repreat = nb_of_repreat[order(-unlist(nb_of_repreat))] 
+
+# On ne récupère que l'id_entrez qui apparaît en premier dans le tableau lorsque le gène est présent plusieurs fois
+indices_kept = lapply(indices_rep, `[[`, 1) # Récupère la 1ere valeur (indice de ligne) de chaque élément de la liste
+
+# On fait le subset du tableau initial avec les indices récupérés
+# Attention : il reste des gènes pour lesquels le id_entez est NA (préfère les garder pour l'instant)
+symbol_entrez_df = genes[unlist(indices_kept),]
+symbol_entrez_df = symbol_entrez_df[-1,]# On enlève la première ligne qui correspondait aux gènes sans nom
+
+save(symbol_entrez_df, file = "input_files/symbol_entrez_df.rda")
+
+rm(genes,indices_kept,indices_rep,mart,nb_of_repreat,ordered_nb_of_repreat)
+  
+```
+**- Output 2 : intermediary_spread_joined_df.rda => Stat sur population (mean, sd, sum, n_cells, prop_pos_cell)**  
+```{r Pop stat calculations, eval=FALSE, warning=FALSE}
+
+# Petit tableau plus facile à manipuler (on enlève la première colonne inutile)
+test_table = Spread_MARSseq_data_all_filters_20200728[,2:101]
+
+# On enlève le gros tableau pour ne pas cliquer dessus par erreur
+# rm(Spread_MARSseq_data_all_filters_20200728)
+
+### Calcul de la moyenne UMI, SD UMI et somme UMI (2 col + 97*3 col = 293 col)
+  spread_data_grouped = Spread_MARSseq_data_all_filters_20200728 %>% 
+  group_by(condition,donor) %>%
+  dplyr::summarise(across(contains("chr"), .fns = list(mean_UMI = mean, sd_UMI = sd, sum_UMI = sum)))
+
+### Calcul de la proportion de cellule avec avec + 0 UMI
+
+#1: nombre de cellule pour chaque condition et donneur      
+n_cells = Spread_MARSseq_data_all_filters_20200728 %>% 
+  group_by(condition,donor) %>%
+  summarise(n_cells = n_distinct(cell)) 
+
+#2: combien de cellules avec +0 UMI pour chaque gène, par condition et donneur
+is_pos_cells = Spread_MARSseq_data_all_filters_20200728 %>% 
+  group_by(condition,donor) %>%
+  summarise(across(contains("chr"), .fns = ~sum(.!=0))) %>%
+  add_column(n_cells = n_cells$n_cells, .after = "donor")
+
+#3: calcul de la proportion en divisant #2/#1
+prop_pos_cells = is_pos_cells %>% 
+  group_by(condition,donor) %>%
+  summarise(across(contains("chr"), .fns = ~{.x/n_cells},.names = "{.col}_Prop_cell_pos")) 
+
+# On rassemble les deux tableaux 
+spread_data_joined = left_join(spread_data_grouped, prop_pos_cells, by = c("condition","donor"))
+
+# On réorganise les colones ar ordre alphabétique, en gardant les 2 premières (donor et condition) au début
+# Obligé de faire +2 au vecteur d'index qui sort de "order" car il commence à 1, qui correspond en fait au 3 du tableau
+spread_data_joined = spread_data_joined[c(1,2,order(colnames(spread_data_joined)[3:ncol(spread_data_joined)])+2)]
+
+save(spread_data_joined, file = "intermediary_generated_files/intermediary_spread_joined_df.rda")
+
+rm(is_null_cells, n_cells, prop_pos_cells, spread_data_grouped, spread_data_joined)
+
+```
+**- Output 3 : Arranged_Spread_MARSseq_data_all_filters_20200728.rda => Tableau réarrangé pour script Ravi**
+```{r Gene info retrieving, eval = FALSE, warning=FALSE}
+
+load("intermediary_generated_files/intermediary_spread_joined_df.rda")
+load("input_files/symbol_entrez_df.rda")
+
+# On pivote le tableau pour avoir les noms de colones (gene_chr_info) en tnat que variable sur laquelle travailler
+longer_data_grouped = pivot_longer(data = spread_data_joined, cols = contains("chr"), names_to = "Gene_chr_info")
+
+# On sépare chaque observation de gene_chr_info en 2 col (Gene)
+Gene_chr_info_splitted = str_split_fixed(longer_data_grouped$Gene_chr_info, pattern = "\\.\\.", n=2)
+
+#Symbol (nom du gène) est la première colone de Gene_chr_info_splitted
+symbol = tibble(symbol = Gene_chr_info_splitted[,1])
+
+# On fait correspondre les symbol (= nom) avec les entrez_id
+Gene_info = left_join(symbol, symbol_entrez_df, by = "symbol")
+
+# Gene_chr est la chaine de caractère avant le "_" dans la deuxième colone de Gene_chr_info_splitted
+Gene_chr = str_split_fixed(Gene_chr_info_splitted[,2], pattern = "_", n=2)[,1]
+
+# on recréé une colone pop_stat avec la répétition "mean, prop, sd, sum" autant de fois qu'il y a de gènes
+Pop_stat = rep(c("mean_UMI","Prop_pos","sd_UMI","sum_UMI"), nrow(longer_data_grouped)/4)
+
+# On recréé le tableau en regroupant les colonnes
+longer_data_grouped = longer_data_grouped %>% 
+  bind_cols(symbol = Gene_info[1], ENTREZID = Gene_info[2], chr = Gene_chr, Pop_stat = Pop_stat) %>%
+  mutate(value = round(value,3)) %>%
+  mutate(condition = paste0("X",condition)) %>%
+  dplyr::select(-Gene_chr_info)
+
+# Enfin, on repivote le tableau en largeur pour avoir toutes les colonnes nécessaires 
+# Par nécessaire on entend identique au tableau expression_data avec lequel le script de Ravi fonctionne
+wider_data_grouped = pivot_wider(data = longer_data_grouped, 
+    names_from = c(condition, donor, Pop_stat), 
+    names_sep = "_", values_from = value) %>%
+  mutate(transript_name_chr = paste(symbol,chr, sep = "; " ), .after = "symbol")
+
+# Permet de "vectoriser" les colonnes qui sont sous forme de liste suite aux précédentes opérations
+wider_data_grouped = data.frame(lapply(wider_data_grouped, function(x) unlist(x)))
+
+save(wider_data_grouped, file = "intermediary_generated_files/Arranged_Spread_MARSseq_data_all_filters_20200728.rda")
+
+# rm(list = ls())
+
+```
+</div>
+
+
+
+<br><br><br> <!--Pour avoir un espace entre les grandes parties-->
+
+
+
+# .Interval 05h --> 24h  
+
+## .Calcul du Zscore moyen pour chaque gène  
+
+\
+*Rappel sur le Zscore : le calcul du Zscore nous permet ici de déterminer s'il y a eu un changement significatif (augmentation ou diminution) dans l'expression des gènes entre les deux points de temps étudiés. Le calcul du Zscore suit la formule suivante : (moyenne_temps2 - moyenne_temps1) / (sqrt(sd_temps1² + sd_temps2²)/sqrt(n)) avec n le nombre total de cellules étudiées pour chaque point de temps.* \
+D'après la formule, on observe que n_temps1 est supposé être égal à n_temps2 ce qui n'est pas tout à fait exact pour notre jeu de donnée. Dans le script initial, Ravi avait approximé l'effectif à 100. Pour limiter le biais, nous avons ici décidé d'utiliser la moyenne du nb de cellule entre les deux points de temps pour chaque donneur (voir chunk). On calcule pour chaque gène le Zscore par donneur puis on effectue la moyenne du Zscore entre les donneurs. \
+
+<div class = "grey">
+**- Chargement et initialisation des données d'entrée**
+```{r, eval = TRUE}
+# Load data MARSseq (issu de Spread_MARSseq_data_all_filters_20200728) arrangé pour fonctionner avec script Ravi
+load("intermediary_generated_files/Arranged_Spread_MARSseq_data_all_filters_20200728.rda")
+expr = wider_data_grouped
+rm(wider_data_grouped)
+
+## Cutoff du Z score
+# z_cutoff = 2  # initialisé dans le chunk général en haut du code
+n_cell_d1 = (78+88)/2
+n_cell_d2 = (95+88)/2
+```
+**- Calcul du Zscore pour chaque gène**
+```{r, eval = TRUE}
+donor1_mean_diff = (expr$X24Hrs_1_mean_UMI - expr$X05Hrs_1_mean_UMI) # numérateur du Zscore
+donor1_standard_error = sqrt((expr$X05Hrs_1_sd_UMI)^2 + (expr$X24Hrs_1_sd_UMI)^2)/sqrt(n_cell_d1)  # Dénominateur du Zscore
+donor1_Z = donor1_mean_diff/donor1_standard_error
+donor1_Z[is.na(donor1_Z)] = 0
+
+donor2_mean_diff = (expr$X24Hrs_2_mean_UMI - expr$X05Hrs_2_mean_UMI) # numérateur du Zscore
+donor2_standard_error = sqrt((expr$X05Hrs_2_sd_UMI)^2 + (expr$X24Hrs_2_sd_UMI)^2)/sqrt(n_cell_d2)  # Dénominateur du Zscore
+donor2_Z = donor2_mean_diff/donor2_standard_error
+donor2_Z[is.na(donor2_Z)] = 0
+
+# Moyenne des Zscores pour les deux donneurs pour chaque gene
+Z_score = (donor1_Z+donor2_Z)/2 # un vecteur avec la moyenne des Zscore pour chaque gene (dans le même ordre que les gènes de expr)
+```
+**- Enregistrement du vecteur de Zscore**
+```{r, eval = FALSE}
+save(Z_score, file = "intermediary_generated_files/Zscore_all_genes_value_vector_05_24.rda")
+```
+</div>
+
+\
+On obtient en sortie un vecteur avec tous les Z_score rangés dans l'ordre des gènes du tableau Arranged_Spread_MARSseq_data_all_filters_20200728. Il s'agit du fichier : Zscore_all_genes_value_vector_05_24.rda \
+\
+
+**Affichage des Zscores calculés**
+```{r, eval = TRUE}
+
+cat("Entre 0h et 5h, il y a : \n",
+    length(which(Z_score>2)),"gènes dont le Zscore est supérieur à 2. \n",
+    length(which(Z_score>2)),"gènes dont le Zscore est supérieur à 2. \n",
+    length(Z_score) - length(which(Z_score>2)) - length(which(Z_score<(-2))),"gènes dont le Zscore est non significatif.")
+
+```
+\
+Le cutoff du Zscore étant défini à 2, les gènes dont le Zscore est compris entre -2 et 2 ne sont pas significatifs : il n'y a pas de différence d'expression notable entre les deux points de temps testés. Toutefois, pour les gènes dont Zscore < -2,  alors il y a une diminution significative d'expression et si Zscore > 2 alors il s'agit d'une augmentation significative d'expression entre les deux points de temps. \
+Par la suite, on utilisera les dénominations suivantes : \
+
+- -2 < Zscore < 2 = non significatif = No change in gene expression
+- Zscore < -2 ou Zscore > 2 = significatif = Change in gene expression
+
+
+```{r, eval = TRUE}
+
+total = c( # total gene with zscore
+  length(which(Z_score<(-z_cutoff) | Z_score>z_cutoff)), 
+  length(-which(Z_score>(-z_cutoff) & Z_score<z_cutoff)),
+  length(Z_score)
+  )
+
+df_nb_gene_change_nochange = tibble(Z_score = c("Change", "No_change", "Total"), Nb_gene = total)
+
+df_nb_gene_change_nochange %>% 
+  kable(caption = "Nombre de gènes Change/NoChange (détectés en RNAseq)") %>%
+  kable_styling(full_width = F)
+
+# rm(list = ls()) # Effacer tous les objets créés dans l'espace de travail
+```
+
+
+
+<br><br><br> <!--Pour avoir un espace entre les grandes parties-->
+
+
+
+## .Configuration du promoteur vs expression génique  
+
+### .Script de Ravi réorganisé avec nos données  
+\
+Cette partie de l'analyse commence par charger le fichier "prom_peaks_overlap.rda".  \
+==> Il s'agit d'une liste correspondant aux points de temps 05h, 24h et 48h en ATAC-seq. \
+==> Chaque élément de la liste est un tableau avec l'ensemble des promoteurs de la base de données FANTOM (**123 440 promoteurs** qui correspondent à **16 887** noms de gènes uniques) additionné de l'information de l'overlap (1 = oui | 0 = non) d'un de nos peaks ATACseq à ce point de temps. Cet overlap avec la base de donnée FANTOM a été réalisé dans un autre script que Ravi ne nous a pas fourni. Mais il s'agit simplement d'un overlap réalisé avec Grange. \
+
+<div class = "grey">
+**- Chargement des inputs**
+```{r, Chargement des trois fichiers input, eval = TRUE}
+# Load data MARSseq (issu de Spread_MARSseq_data_all_filters_20200728) arrangé pour fonctionner avec script Ravi
+load("intermediary_generated_files/Arranged_Spread_MARSseq_data_all_filters_20200728.rda")
+expr = wider_data_grouped
+rm(wider_data_grouped)
+
+# Load du vecteur de Zscore
+load("intermediary_generated_files/Zscore_all_genes_value_vector_05_24.rda")
+
+# Load de la liste des promoteurs (123440) avec info relatives + overlap des peaks ATAC à 5h, 24h et 48h
+load("input_files/prom_peaks_overlap.rda")
+## Colonne PeakOverlap : si 0 ça veut dire qu'on a pas de peak qui tombe dans le promoteur à ce temps là
+#                        si 1 alors peak tombe dans le promoteur
+
+```
+</div>
+
+
+```{r, Description donnees ATAC, eval = TRUE}
+# On créé le tableau générique de tous les promoteurs sans les overlap
+Overlap = prom_peaks_overlap[[1]][,-c(9)] 
+
+# On rajoute les overlap de nos peaks sur les promoteurs
+Overlap$peakOverlap_1 = prom_peaks_overlap[[1]]$PeakOverlap ## 05Hrs
+Overlap$peakOverlap_2 = prom_peaks_overlap[[2]]$PeakOverlap ## 24Hrs
+
+distinct_prom = dplyr::distinct(Overlap, promoter, gene, peakOverlap_1, peakOverlap_2)
+
+# On créé un tableau récapitulatif
+
+df_ATAC_Fantom = data.frame(Unique_Promotors = c(length(unique(Overlap$promoter)),
+                                                 length(unique(distinct_prom[which(rowSums(distinct_prom[,c(3:4)])>0),]$promoter)),
+                                                 length(unique(distinct_prom[-which(rowSums(distinct_prom[,c(3:4)])>0),]$promoter))),
+                            Unique_Genes = c(length(unique(Overlap$gene)),
+                                             length(unique(distinct_prom[which(rowSums(distinct_prom[,c(3:4)])>0),]$gene)),
+                                             length(unique(distinct_prom[-which(rowSums(distinct_prom[,c(3:4)])>0),]$gene))))
+rownames(df_ATAC_Fantom) = c("Fantom5", "Fantom5_in_ATAC", "Fantom5_not_in_ATAC")
+
+df_ATAC_Fantom %>%
+  kable() %>%
+  kable_styling(full_width = F)
+
+print(paste("Notons qu'il y a", nrow(distinct_prom) - length(unique(Overlap$promoter)),"promoteurs qui sont associés à plus de 1 gène."))
+
+rm(prom_peaks_overlap)
+```
+
+\
+<div class = "grey">  
+**- Création des catégories de configuration (Open-Open, Open-Close...) avec Zscore associé**
+```{r, Création liste peak_condition et enregistrement, eval = FALSE}
+
+# Définition des catégories open close pour tous les 123440 promoteurs
+peaks_condition = list()
+peaks_condition[[1]] = Overlap[which(Overlap$peakOverlap_1==1 & Overlap$peakOverlap_2==1),] # Open - Open
+peaks_condition[[2]] = Overlap[which(Overlap$peakOverlap_1==1 & Overlap$peakOverlap_2==0),] # Open - Close
+peaks_condition[[3]] = Overlap[which(Overlap$peakOverlap_1==0 & Overlap$peakOverlap_2==1),] # Close - Open
+peaks_condition[[4]] = Overlap[which(Overlap$peakOverlap_1==0 & Overlap$peakOverlap_2==0),] # Close - Close
+
+names(peaks_condition) =  c("Open_Open", "Open_Close", "Close_Open","Close_Close")
+
+# Deux boucles for imbriquées pour ajouter le Zscore qui correspond au bon gène
+# Le vecteur Zscore est dans le même ordre que le tableau expr
+# Donc on rajoute le Zscore à la fin des listes peak_condition en allant chercher dans expr avec chr et symbol
+
+timer_artificial_null = 0
+
+for (i in 1:length(peaks_condition)) {
+  peaks_condition[[i]]$Z_score = 0
+  peaks_condition[[i]]$Nature_of_Zscore = "artificial" 
+
+  for (j in 1:length(peaks_condition[[i]]$promoter)) {
+    chr = peaks_condition[[i]]$seqnames[j]
+    gene = peaks_condition[[i]]$gene[j]
+    ind = which(expr$chr == chr & expr$symbol == gene)
+    
+    if (length(ind)>0) {
+      peaks_condition[[i]]$Z_score[j] = Z_score[ind]
+      peaks_condition[[i]]$Nature_of_Zscore[j] = "TRUE"
+    }
+    
+  }
+  
+  timer_artificial_null = 0
+  
+}
+
+save(peaks_condition, file = "intermediary_generated_files/list_prom_config_and_Gene_expr_Zscore_05_24.rda" )
+
+
+```
+On obtient une liste avec 4 tableaux (un par configuration) listant tous les promoteurs et leur overlap avec ATAC et les gènes associés à chacun de ces promoteurs : list_prom_config_and_Gene_expr_Zscore_05_24.rda".
+</div>
+  
+\
+**Affichage des données**
+```{r, Matrice final nb gene vs config, eval = TRUE}
+# Car eval = FALSE dans le chunk d'avant 
+load("intermediary_generated_files/list_prom_config_and_Gene_expr_Zscore_05_24.rda")
+
+### Réalisation des matrices avec les nombres de cas (hit) pour chaque combinaison
+# z_cutoff = 2
+final = matrix(0, nrow = 5, ncol = 4)
+
+for (i in 1:length(peaks_condition)){
+  
+  # Nb gène unique par catégorie de configuration (attention possible multi-count possible dans pluseurs catégorie)
+  final[i,1] = length(unique(peaks_condition[[i]]$gene))
+  final[i,2] = length(unique(peaks_condition[[i]]$gene[-which(peaks_condition[[i]]$Z_score>(-z_cutoff) & peaks_condition[[i]]$Z_score<z_cutoff)]))
+  final[i,3] = length(unique(peaks_condition[[i]]$gene[which(peaks_condition[[i]]$Z_score>(-z_cutoff) & peaks_condition[[i]]$Z_score<z_cutoff)]))
+  final[i,4] = length(unique(peaks_condition[[i]]$gene[which(peaks_condition[[i]]$Nature_of_Zscore == "artificial")]))
+  final[5,] = c(length(Z_score),length(which(Z_score<(-z_cutoff) | Z_score>z_cutoff)),length(-which(Z_score>(-z_cutoff) & Z_score<z_cutoff)),0)
+
+}
+
+colnames(final) = c("Total","Change", "No_Change","No_mRNA_in_No_change")
+rownames(final) = c("Open_Open", "Open_Close", "Close_Open", "Close_Close", "Nb_change_nochange_dataset")
+
+final[1:4,]%>% 
+  kable(caption = "Nombre de gènes vs configuration des promoteurs") %>%
+  kable_styling(full_width = F)
+```
+
+Au total il y a **16887 gènes** diférents dans la database des promoteurs. *On remarque qu'en additionnant tous les gènes dans les différentes configurations de promoteur (somme de la colonne total), on dépasse cette valeur, on obtient 20949.* C'est parce que certains gènes sont comptés plusieurs fois dans des catégorires différentes. **Cela arrive quand un (ou plusieurs) TF vise des promoteurs différents de ce gène et que ces promoteurs ont des dynamiques différentes.** \
+
+```{r, Nombre de multicount pour les config, eval = TRUE}
+
+for(i in 1:4){
+
+count_multiple_prom = Overlap %>% 
+  distinct(gene, seqnames, peakOverlap_1, peakOverlap_2) %>% 
+  group_by(gene) %>% 
+  filter(n() == i)
+
+print(paste("Au total, il y a", length(unique(count_multiple_prom$gene)),"gènes avec", i, "attribution(s) à des config de promoteurs."))
+
+}
+```
+
+```{r, Plot proportion Gene Change pour les config, eval = TRUE, warning= FALSE}
+
+nb_gene_change_nochange_prom_config = as_tibble(unname(final[1:4,2:4]))
+nb_gene_change_nochange_prom_config$Config = c("Open_Open", "Open_Close", "Close_Open", "Close_Close")
+
+colnames(nb_gene_change_nochange_prom_config) = c("Change", "No_Change","Nb_gene_with_no_mRNA_in_No_Change","Prom_config")
+nb_gene_change_nochange_prom_config = nb_gene_change_nochange_prom_config %>%
+  dplyr::select(Prom_config, Change, No_Change, Nb_gene_with_no_mRNA_in_No_Change)
+
+sum_change = sum(nb_gene_change_nochange_prom_config$Change)
+
+plot_df = nb_gene_change_nochange_prom_config %>% group_by(Prom_config) %>% mutate(prop_change = round((Change/sum_change)*100,1))
+plot_df$Prom_config = factor(plot_df$Prom_config, levels = c("Open_Open","Open_Close","Close_Open","Close_Close"))
+
+# ggplot(data = plot_df, aes(x = Prom_config, y = prop_change)) +
+#   geom_bar(stat = "identity") +
+#   geom_text(aes(label = prop_change), vjust = -0.25) +
+#   scale_y_continuous(name = "% of gene in category", limits = c(0,100), breaks = seq(from = 0, to = 100, by = 10))
+
+ggplot(data = plot_df, aes(x = Prom_config, y = Change)) +
+  geom_bar(stat = "identity") +
+  ylim(0,5000) +
+  geom_text(aes(label = Change), vjust = -0.25) +
+  geom_text(data = subset(plot_df, Prom_config == "Open_Open"), aes(label = "***"), vjust = -1, size = 10) 
+
+```
+
+<div class="col2">
+```{r, Matrices pValue et odd ratio pour les config, eval = TRUE}
+
+pval = matrix(0,nrow = 4, ncol = 4)
+oddr = matrix(0,nrow = 4, ncol = 2)
+
+for (i in 1:4) {
+  
+  for (j in 1:2) {
+    hitInSample = final[i,j+1]
+    hitInPop = final[5,j+1]
+    failInPop = final[5,1]-final[5,j+1]
+    sampleSize = final[i,1]
+
+    a2 = fisher.test(matrix(c(hitInSample, hitInPop-hitInSample, sampleSize-hitInSample, failInPop-sampleSize +hitInSample), 2, 2), alternative='less')
+    pval[i,j] = a2$p.value
+    oddr[i,j] = as.numeric(a2$estimate)
+  }
+
+  for (j in 1:2) {
+    
+    hitInSample = final[i,j+1]
+    hitInPop = final[5,j+1]
+    failInPop = final[5,1]-final[5,j+1]
+    sampleSize = final[i,1]
+
+    a2 = fisher.test(matrix(c(hitInSample, hitInPop-hitInSample, sampleSize-hitInSample, failInPop-sampleSize +hitInSample), 2, 2), alternative='greater')
+    pval[i,j+2] = a2$p.value
+    
+  }
+}
+
+colnames(pval) = c("Under-representation_Gene_Change", "Under-representation_Gene_No_Change", "Gene Change", "Gene No_Change")
+rownames(pval) = c("Open_Open", "Open_Close", "Close_Open","Close_Close")
+colnames(oddr) = c("Change", "No Change")
+rownames(oddr) = c("Open_Open", "Open_Close", "Close_Open","Close_Close")
+
+
+
+pval[,3:4] %>% 
+  kable(caption = "Tableau des pValues (Over Representation)") %>% 
+  kable_styling(full_width = FALSE, position = "float_left")
+oddr%>% 
+  kable(caption = "Tableau des odd ratio") %>% 
+  kable_styling(full_width = FALSE, position = "right")
+
+
+```
+</div>
+
+\
+<div class = "grey">  
+**- Enregistrement des matrices de sortie**
+```{r, Enregistrement des matrices output, eval = FALSE}
+write.table(final, "output/05h_vs_24h/ATAC_GeneExpr_numbers_05_24.csv", row.names = T, col.names = NA, sep = "\t")
+write.table(pval, "output/05h_vs_24h/ATAC_GeneExpr_pval_05_24.csv", row.names = T, col.names = NA, sep = "\t")
+write.table(oddr, "output/05h_vs_24h/ATAC_GeneExpr_oddsratio_05_24.csv", row.names = T, col.names = NA, sep = "\t")
+```
+</div>
+
+
+
+<br><br><br> <!--Pour avoir un espace entre les grandes parties-->
+
+
+
+### .Scripts annexes (non vérifiés)  
+  
+Ravi a également produit des scripts :  \
+- Avec la catégorie Change décomposée en Up et Down  \
+- Ciblé sur les promoteurs et non pas les gènes  \
+
+Ces deux approches donnaient des résultats sensiblement équivalents à ceux obtenus avec le script au-dessus. Ils n'ont cependant pas été reproduits avec le nouveau jeu de donné.\
+
+<div class = "grey"> 
+Script : Promoter configuration vs expression (Up & down & NoChange - Ciblée gènes)
+```{r Promoter configuration vs expression (Up & down & NoChange - Ciblée gènes), eval=F}
+
+############################################
+### Promoter configuration vs expression ###  
+###   "Change" décomposé en up et down  ####
+############################################
+
+### Réalisation des matrices avec les nombres de cas (hit) pour chaque combinaison
+
+t = matrix(0, nrow = 5, ncol = 4)
+
+for (i in 1:length(peaks_condition)){
+  t[i,1] = length(unique(peaks_condition[[i]]$gene))
+  t[i,2] = length(unique(peaks_condition[[i]]$gene[which(peaks_condition[[i]]$Z_score>z_cutoff)]))
+  t[i,3] = length(unique(peaks_condition[[i]]$gene[which(peaks_condition[[i]]$Z_score<(-z_cutoff))]))
+  t[i,4] = length(unique(peaks_condition[[i]]$gene[which(peaks_condition[[i]]$Z_score>(-z_cutoff) & peaks_condition[[i]]$Z_score<z_cutoff)]))
+}
+
+t[5,] = c(length(Z_score),
+  length(which(Z_score>z_cutoff)),
+  length(which(Z_score<(-z_cutoff))), 
+  length(Z_score) - length(which(Z_score>z_cutoff)) - length(which(Z_score<(-z_cutoff)))
+  )
+
+colnames(t) = c("All", "Up", "Down", "No Change")
+rownames(t) = c("Open_Open", "Open_Close", "Close_Open", "Close_Close", "Total_Data")
+
+### Réalisation des matrices de pvalue et de odd ratio pour chaque combinaison
+
+pval = matrix(0,nrow = 4, ncol = 6)
+oddr = matrix(0,nrow = 4, ncol = 3)
+
+for (i in 1:4) {
+  
+  for (j in 1:3) {
+    hitInSample = t[i,j+1]
+    hitInPop = t[5,j+1]
+    failInPop = t[5,1]-t[5,j+1]
+    sampleSize = t[i,1]
+
+    a2 = fisher.test(matrix(c(hitInSample, hitInPop-hitInSample, sampleSize-hitInSample, failInPop-sampleSize +hitInSample), 2, 2), alternative='less')
+    pval[i,j] = a2$p.value
+    oddr[i,j] = as.numeric(a2$estimate)
+  }
+  
+  for (j in 1:3) {
+    hitInSample = t[i,j+1]
+    hitInPop = t[5,j+1]
+    failInPop = t[5,1]-t[5,j+1]
+    sampleSize = t[i,1]
+
+    a2 = fisher.test(matrix(c(hitInSample, hitInPop-hitInSample, sampleSize-hitInSample, failInPop-sampleSize +hitInSample), 2, 2), alternative='greater')
+    pval[i,j+3] = a2$p.value
+    
+  }
+}
+
+colnames(pval) = c("Up", "Down", "No Change","Up", "Down", "No Change")
+colnames(oddr) = c("Up", "Down", "No Change")
+rownames(pval) = c("Open_Open", "Open_Close", "Close_Open","Close_Close")
+rownames(oddr) = c("Open_Open", "Open_Close", "Close_Open","Close_Close")
+
+
+### Enregistrement des matrices ouput
+
+write.table(tp, "output/05h_vs_24h/ATAC_GeneExpr_up_down_noChange_numbers.csv", row.names = T, col.names = NA, sep = "\t")
+write.table(pval, "output/05h_vs_24h/ATAC_GeneExpr_up_down_noChange_pval.csv", row.names = T, col.names = NA, sep = "\t")
+write.table(oddr, "output/05h_vs_24h/ATAC_GeneExpr_up_down_noChange_oddsratio.csv", row.names = T, col.names = NA, sep = "\t")
+
+
+```
+Script : Promoter configuration vs expression (Change & NoChange - Ciblée promoteurs
+```{r Promoter configuration vs expression (Change & NoChange - Ciblée promoteurs), eval=F }
+
+tp = matrix(0, nrow = 5, ncol = 3)
+
+for (i in 1:length(peaks_condition)){
+  tp[i,1] = length(unique(peaks_condition[[i]]$promoter))
+  tp[i,2] = length(unique(peaks_condition[[i]]$promoter[-which(peaks_condition[[i]]$Z_score>(-z_cutoff) & peaks_condition[[i]]$Z_score<z_cutoff)]))
+  tp[i,3] = length(unique(peaks_condition[[i]]$promoter[which(peaks_condition[[i]]$Z_score>(-z_cutoff) & peaks_condition[[i]]$Z_score<z_cutoff)]))
+}
+tp[5,] = colSums(tp)
+colnames(tp) = c("All", "Change", "No_Change")
+rownames(tp) = c("Open_Open", "Open_Close", "Close_Open", "Close_Close", "Total_Data")
+
+pval = matrix(0,nrow = 4, ncol = 4)
+oddr = matrix(0,nrow = 4, ncol = 2)
+for (i in 1:4) {
+  for (j in 1:2) {
+    hitInSample = tp[i,j+1]
+    hitInPop = tp[5,j+1]
+    failInPop = tp[5,1]-tp[5,j+1]
+    sampleSize = tp[i,1]
+
+    a2 = fisher.test(matrix(c(hitInSample, hitInPop-hitInSample, sampleSize-hitInSample, failInPop-sampleSize +hitInSample), 2, 2), alternative='less')
+    pval[i,j] = a2$p.value
+    oddr[i,j] = as.numeric(a2$estimate)
+  }
+
+  for (j in 1:2) {
+    hitInSample = tp[i,j+1]
+    hitInPop = tp[5,j+1]
+    failInPop = tp[5,1]-tp[5,j+1]
+    sampleSize = tp[i,1]
+
+    a2 = fisher.test(matrix(c(hitInSample, hitInPop-hitInSample, sampleSize-hitInSample, failInPop-sampleSize +hitInSample), 2, 2), alternative='greater')
+    pval[i,j+2] = a2$p.value
+  }
+}
+colnames(pval) = c("Change", "No Change", "Change", "No Change")
+rownames(pval) = c("Open_Open", "Open_Close", "Close_Open","Close_Close")
+
+colnames(oddr) = c("Change", "No Change")
+rownames(oddr) = c("Open_Open", "Open_Close", "Close_Open","Close_Close")
+
+
+setwd("D:/Sincity/Final - Copy//Results/05_24/Promoters/")
+write.table(tp, "ATAC_GeneExpr_numbers.txt", row.names = T, col.names = NA, sep = "\t")
+write.table(pval,  "ATAC_GeneExpr_pval.txt", row.names = T, col.names = NA, sep = "\t")
+write.table(oddr,  "ATAC_GeneExpr_oddsratio.txt", row.names = T, col.names = NA, sep = "\t")
+```
+Script : Promoteur configuration vs expression (Up & down & NoChange - Ciblée promoteurs)
+```{r Promoteur configuration vs expression (Up & down & NoChange - Ciblée promoteurs), eval=F }
+
+t = matrix(0, nrow = 5, ncol = 4)
+
+for (i in 1:length(peaks_condition)){
+  t[i,1] = length(unique(peaks_condition[[i]]$promoter))
+  t[i,2] = length(unique(peaks_condition[[i]]$promoter[which(peaks_condition[[i]]$Z_score>z_cutoff)]))
+  t[i,3] = length(unique(peaks_condition[[i]]$promoter[which(peaks_condition[[i]]$Z_score<(-z_cutoff))]))
+  t[i,4] = length(unique(peaks_condition[[i]]$promoter[which(peaks_condition[[i]]$Z_score>(-z_cutoff) & peaks_condition[[i]]$Z_score<z_cutoff)]))
+}
+
+t[5,] = colSums(t)
+colnames(t) = c("All", "Up", "Down", "No Change")
+rownames(t) = c("Open_Open", "Open_Close", "Close_Open", "Close_Close", "Total_Data")
+
+pval = matrix(0,nrow = 4, ncol = 6)
+oddr = matrix(0,nrow = 4, ncol = 3)
+
+for (i in 1:4) {
+  for (j in 1:3) {
+    hitInSample = t[i,j+1]
+    hitInPop = t[5,j+1]
+    failInPop = t[5,1]-t[5,j+1]
+    sampleSize = t[i,1]
+
+    a2 = fisher.test(matrix(c(hitInSample, hitInPop-hitInSample, sampleSize-hitInSample, failInPop-sampleSize +hitInSample), 2, 2), alternative='less')
+    pval[i,j] = a2$p.value
+    oddr[i,j] = as.numeric(a2$estimate)
+  }
+  
+  for (j in 1:3) {
+    hitInSample = t[i,j+1]
+    hitInPop = t[5,j+1]
+    failInPop = t[5,1]-t[5,j+1]
+    sampleSize = t[i,1]
+
+    a2 = fisher.test(matrix(c(hitInSample, hitInPop-hitInSample, sampleSize-hitInSample, failInPop-sampleSize +hitInSample), 2, 2), alternative='greater')
+    pval[i,j+3] = a2$p.value
+  }
+}
+
+colnames(pval) = c("Up", "Down", "No Change","Up", "Down", "No Change")
+colnames(oddr) = c("Up", "Down", "No Change")
+rownames(pval) = c("Open_Open", "Open_Close", "Close_Open","Close_Close")
+rownames(oddr) = c("Open_Open", "Open_Close", "Close_Open","Close_Close")
+
+write.table(t, "ATAC_GeneExpr_All_numbers.txt", row.names = T, col.names = NA, sep = "\t")
+write.table(pval,  "ATAC_GeneExpr_All_pval.txt", row.names = T, col.names = NA, sep = "\t")
+write.table(oddr,  "ATAC_GeneExpr_All_oddsratio.txt", row.names = T, col.names = NA, sep = "\t")
+```
+</div>
+
+
+
+<br><br><br> <!--Pour avoir un espace entre les grandes parties-->
+
+
+
+## .Facteurs de transcription vs expression génique
+  
+### .Script de Ravi réorganisé avec nos données
+\
+Cette partie de l'analyse commence par charger le fichier "prom_gene_fantom.rda" :  \
+==> Il s'agit du fichier issu de la base de donnée **FANTOM5**. Il contient **123440 lignes qui correspondent toutes à un promoteur**. A chaque promoteur est associé un nom de transcrit (variant), le nom du gène, ainsi que les infos de start end du promoteur et son ID. \
+Ensuite le fichier "tf---promoter.prec90.txt" est chargé :  
+- Il liste des FTs ainsi que leurs cibles théoriques (Regulatory circuit, voir method). \
+- On applique un filtre pour garder seulement les cibles avec un **score de confiance >= 0.5** (contrairement à 0.5 à la base). \
+\
+<div class = "grey"> 
+**- Chargement des fichiers d'entrée**
+```{r, Chargement des inputs, eval = TRUE}
+# rm(list = ls())
+# Liste des promoteurs (avec leur info start-end, transcript_id et id) et leur association à un gène
+load("input_files/prom_gene_fantom.rda")
+
+# Tableau qui liste les TF connus(col 1) avec leurs multiples cibles (col 2) et y associe un score de confiance (col 3)
+tf_prom = read.table("input_files/tf---promoter.prec90.txt", header = T, sep = "\t", stringsAsFactors = F) #1169797
+
+# Load data MARSseq (issu de Spread_MARSseq_data_all_filters_20200728) arrangé pour fonctionner avec script Ravi
+load("intermediary_generated_files/Arranged_Spread_MARSseq_data_all_filters_20200728.rda")
+expr = wider_data_grouped
+rm(wider_data_grouped)
+
+# On load le vecteur de Zscore préalablement généré
+load("intermediary_generated_files/Zscore_all_genes_value_vector_05_24.rda")
+
+# z_cutoff = 2
+
+```
+</div>
+
+\
+**Filtre qualité sur le score de confiance**
+```{r, Filtre score sup egal 0.5, eval = TRUE}
+tf_prom_filtered = tf_prom[tf_prom$maxMotifConfidence >= 0.5,] # 248606 (312099 si on met >= 0.5)
+
+df_nbTF = data.frame(Unique_TF = c(length(unique(tf_prom$tf)),length(unique(tf_prom_filtered$tf))),
+                     Total_promotor = c(length(tf_prom$promoter),length(tf_prom_filtered$promoter)),
+                     Unique_promotor = c(length(unique(tf_prom$promoter)),length(unique(tf_prom_filtered$promoter))))
+
+rownames(df_nbTF) = c("Gene Reg TF", "TF>=0.5")
+
+df_nbTF %>%
+  kable() %>%
+  kable_styling(full_width = F)
+
+```
+
+\
+<div class = "grey"> 
+**- Création des listes de tf selon leur classement change/nochange**
+```{r, Création tf_change_list et enregistrement, eval = FALSE}
+# On rajoute une colone Zscore (initialisée à 0)
+tf_prom_filtered$Z = 0
+
+## On associe à chaque TF un Zscore pour savoir si celui-ci a varié dans le temps
+
+for (i in 1:length(tf_prom_filtered$tf)) {
+  ind = which(expr$symbol==tf_prom_filtered$tf[i])
+  if (length(ind)>0) { tf_prom_filtered$Z[i] = Z_score[ind] }
+}
+
+# On créé une liste à deux élement : les TF avec un Zscore significatif et les TF avec un Zscore non significatif
+tf_change_list = list()
+tf_change_list[[1]] = tf_prom_filtered[-which(tf_prom_filtered$Z<z_cutoff & tf_prom_filtered$Z>(-z_cutoff)),] 
+tf_change_list[[2]] = tf_prom_filtered[which(tf_prom_filtered$Z<z_cutoff & tf_prom_filtered$Z>(-z_cutoff)),] 
+names(tf_change_list) = c("TF_genes_change","TF_genes_NoChange")
+
+save(tf_change_list, file = "intermediary_generated_files/list_tf_to_prom_and_Gene_expr_Zscore_05_24.rda")
+```
+</div>
+
+\
+**Affichage des résultats** \
+On observe le nombre de cibles de chaque TF, rangé par ordre croissant. Il va de 1 cible pour le TF "GLIS3" à 21703 cibles pour le TF "SP1".
+
+```{r, création des tableaux sur TF et affichage, eval = TRUE}
+load("intermediary_generated_files/list_tf_to_prom_and_Gene_expr_Zscore_05_24.rda")
+
+df_tf_change = tibble(TF = names(sort(table(tf_change_list[[1]]$tf))), Nb_target = sort(table(tf_change_list[[1]]$tf)))
+df_tf_nochange = tibble(TF = names(sort(table(tf_change_list[[2]]$tf))), Nb_target = sort(table(tf_change_list[[2]]$tf)))
+
+df_stat = tibble(TF_statut = c("Change", "No_Change"), 
+  mean_nb_prom_target = c(mean(table(tf_change_list[[1]]$tf)),mean(table(tf_change_list[[2]]$tf))),
+  SD_nb_prom_target = c(round(sd(table(tf_change_list[[1]]$tf)),0),round(sd(table(tf_change_list[[2]]$tf)),0)),
+  min_nb_prom_target = c(min(table(tf_change_list[[1]]$tf)),min(table(tf_change_list[[2]]$tf))),
+  max_nb_prom_target = c(max(table(tf_change_list[[1]]$tf)),max(table(tf_change_list[[2]]$tf))))
+
+# Affichage des tableaux
+
+df_tf_change %>% 
+  kable(caption = "TF CHANGE et leur nombre de promoteurs cibles") %>%
+  kable_styling(full_width = T, position = "left") %>%
+  scroll_box(height = "300px")
+
+df_tf_nochange  %>% 
+  kable(caption = "TF NO_CHANGE et leur nombre de promoteurs cibles") %>%
+  kable_styling(full_width = T, position = "float_right") %>%
+  scroll_box(height = "300px")
+
+```
+
+```{r, affichage tableaux df_global et df_stat, eval = TRUE}
+df_stat %>% 
+  kable(caption = "Nombre de promoteur ciblés par TF (statistiques)") %>%
+  kable_styling() %>%
+  scroll_box()
+```
+\
+=> Pour les TF_change, la moyenne est à **700 cibles par TF**, mais c'est très variable sd (865). \
+=> Pour les TF_noChange, la moyenne est à **658 cibles par TF**, mais c'est très variable sd (1533).  
+
+```{r, TF et nb cibles, eval = TRUE}
+
+### Etablir la correspondance entre Zscore (change et non change) pour les TF, les Zscore (change et noChange) pour les gènes associés
+### Correspondance faite par l'intermédiaire des promoteurs ciblés par les TF et ces même promoteurs qui controlent les gènes
+gene_list = list() # Gènes controlé
+
+# Nom des gènes récupérés en regardant quel prom ciblent les TF (prom_gene_fantom)
+# Puis  correspondance avec les prom associés aux gènes dans l'objet tf_change_list avec Zscore non significatif uniquement [[1]]
+
+gene_list[[1]] = data.frame(Gene = unique(prom_gene_fantom$gene[prom_gene_fantom$promoter %in% tf_change_list[[1]]$promoter]), stringsAsFactors = F)
+gene_list[[2]] = data.frame(Gene = setdiff(unique(prom_gene_fantom$gene[prom_gene_fantom$promoter %in%  tf_change_list[[2]]$promoter]),gene_list[[1]]$Gene), stringsAsFactors = F)
+
+
+df_global_TF = tibble(TF_statut = c("Change", "No_Change"), 
+  Nb_TF_gene = c(length(unique(tf_change_list[[1]]$tf)),length(unique(tf_change_list[[2]]$tf))),
+  Nb_prom_target = c(nrow(tf_change_list[[1]]),nrow(tf_change_list[[2]])),
+  Nb_unique_prom_target = c(length(unique(tf_change_list[[1]]$promoter)),length(unique(tf_change_list[[2]]$promoter))),
+  Nb_unique_gene_target = c(length(unique(gene_list[[1]]$Gene)),length(unique(gene_list[[2]]$Gene))))
+
+df_global_TF %>% 
+  kable(caption = "TF et leur nb de promoteurs cibles") %>%
+  kable_styling() %>%
+  scroll_box()
+```
+
+\
+Les TF étant eux-mêmes des gènes, on se charge de regarder comment est leur Zscore :  
+==> **56 d'entre eux ont un Zscore au dessus du cutoff à -2 et 2.** \
+==> Ces 56 TF ciblent un total de **21544 promoteurs différents**, qui correspondent à **7769 gènes uniques.** \
+==> Comme un promoteur peut être ciblé par plusieurs TF, il y a un total de **39410 combinaisons TF-prom**.\
+==> Ces **39 410 combinaisons n'impliquent que 6356 gènes uniques** (gène dont le TF est Change donc)  
+\
+*Rappel* :  
+Comme les gènes (change et no change) ne sont comptés qu'une seule fois - car à partir du moment où ils sont dans les 2 catégories (TF_change et TF_No_Change) alors ils sont comptés dans TF_Change - dans le cas, où ils sont plusieurs fois dans TF_change ou TF_No_Change alors ils ne sont comptés qu'une seule fois dans la catégorie.
+
+
+```{r, Gene non cibles, eval = TRUE}
+# On fait correspondre les Zscore au gènes controlé par un TF qui change
+# On rajoute le Zscore associé au gène en allant chercher la correspondance dans le tableau expr
+
+# Matrice de résutats (hits)
+
+gene_list[[1]]$Z_score = NA
+
+for (j in 1:length(gene_list[[1]]$Gene)) {
+  ind = which(expr$symbol==gene_list[[1]]$Gene[j])
+  if (length(ind)>0) { gene_list[[1]]$Z_score[j] = Z_score[ind] }
+}
+  
+gene_list[[2]]$Z_score = NA
+
+for (j in 1:length(gene_list[[2]]$Gene)) {
+    ind = which(expr$symbol==gene_list[[2]]$Gene[j])
+    if (length(ind)>0) {gene_list[[2]]$Z_score[j] = Z_score[ind] }
+}
+
+# Les NA proviennent du fait que parfois les TF ciblent des gènes (lien FANTOM et TF) qui n'ont pas été détectés en RNAseq
+cat("Attention, tous ces gènes n'ont pas été détectés en RNAseq. \n",
+    "Au total, il y a", sum(is.na(gene_list[[1]]$Z_score)),
+    "gènes pour lesquel un TF avec un Zscore Change est associé, mais il n'y a pas de transcrits détecté en RNAseq. \n",
+    "Au total, il y a", sum(is.na(gene_list[[2]]$Z_score)),
+    "gènes pour lesquel un TF avec un Zscore NoChange est associé, mais il n'y a pas de transcrits détecté en RNAseq.")
+
+gene_list[[1]] = gene_list[[1]][complete.cases(gene_list[[1]]),]
+gene_list[[2]] = gene_list[[2]][complete.cases(gene_list[[2]]),]
+
+save(gene_list, file = "intermediary_generated_files/list_target_genes_Change_NoChange_05_24.rda")
+
+```
+
+```{r, Gene vs TF, eval = TRUE}
+# On remplit la première ligne de la matrice de résultat (càd les gene change et non change sous controle d'un TF qui est Change)
+final = matrix(0, nrow = 2, ncol = 3) 
+z_cutoff = 2
+
+final[1,1] = length(unique(gene_list[[1]]$Gene))
+final[1,2] = length(unique(gene_list[[1]]$Gene[-which(gene_list[[1]]$Z_score<z_cutoff & gene_list[[1]]$Z_score>(-z_cutoff))]))
+final[1,3] = length(unique(gene_list[[1]]$Gene[which(gene_list[[1]]$Z_score<z_cutoff & gene_list[[1]]$Z_score>(-z_cutoff))]))
+
+final[2,1] = length(unique(gene_list[[2]]$Gene))
+final[2,2] = length(unique(gene_list[[2]]$Gene[-which(gene_list[[2]]$Z_score<z_cutoff & gene_list[[2]]$Z_score>(-z_cutoff))]))
+final[2,3] = length(unique(gene_list[[2]]$Gene[which(gene_list[[2]]$Z_score<z_cutoff & gene_list[[2]]$Z_score>(-z_cutoff))]))
+
+colnames(final) = c("all genes", "Target_Gene_Change", "Target_Gene_No_Change")
+rownames(final) = c("TF Change", "TF No Change")
+
+final %>% 
+  kable(caption = "Gènes change/no_change vs statut du TF qui les cible") %>%
+  kable_styling(full_width = F)
+
+```
+
+```{r, TF_statut vs Target gene statut, eval = TRUE}
+
+df = tibble(TF_statut = rownames(final), Target_Gene_change = final[,2], Target_Gene_No_change = final[,3])
+df = pivot_longer(df,cols = c(Target_Gene_change,Target_Gene_No_change),names_to = "Target_Gene_statut")
+
+sum_Gene_change = sum(df$value[which(df$Target_Gene_statut== "Target_Gene_change")])
+
+plot_df = df %>% 
+  filter(Target_Gene_statut == "Target_Gene_change") %>% 
+  mutate(prop_change = round((value/sum_Gene_change)*100,1))
+plot_df$TF_statut = as_factor(plot_df$TF_statut)
+
+# ggplot(data = plot_df, aes(x = TF_statut, y = prop_change)) +
+#   geom_bar(stat = "identity")+
+#   geom_text(aes(label = prop_change), vjust = -0.25) +
+#   geom_text(data = subset(plot_df, TF_statut == "TF Change"), aes(label = "***"), vjust = -1, size = 10) +
+#   scale_y_continuous(name = "% of gene in category", limits = c(0,100), breaks = seq(from = 0, to = 100, by = 10))
+
+ggplot(data = plot_df, aes(x = TF_statut, y = value)) +
+  geom_bar(stat = "identity")+
+  ylim(0,3000) +
+  geom_text(aes(label = value), vjust = -0.25) +
+  geom_text(data = subset(plot_df, TF_statut == "TF Change"), aes(label = "***"), vjust = -0.5, size = 10) 
+
+```
+
+```{r, Gene cible de la liste TF, eval = TRUE}
+
+total =  c(length(Z_score),length(which(Z_score<(-z_cutoff) | Z_score>z_cutoff)),length(-which(Z_score>(-z_cutoff) & Z_score<z_cutoff)))
+
+total_gene_sum_up = tibble(RNA_seq_data = c("Total detected", "Gene change", "Gene_no_Change"), 
+                           Gene_nb = total,
+                           Nb_TF_targeted_gene = c(sum(df$value),
+                                                   sum(df$value[which(df$Target_Gene_statut== "Target_Gene_change")]),
+                                                   sum(df$value[which(df$Target_Gene_statut== "Target_Gene_No_change")])))
+
+total_gene_sum_up = total_gene_sum_up %>% mutate(Gene_with_no_targetting_TF = Gene_nb - Nb_TF_targeted_gene)
+
+total_gene_sum_up %>% 
+  kable(caption = "Gènes ciblé et non ciblés par notre liste de TF") %>%
+  kable_styling() 
+```
+
+<div class="col2">
+```{r, Matrices pvalue et oddratio, eval = TRUE}
+
+pval = matrix(0,nrow = 2, ncol = 4)
+oddr = matrix(0,nrow = 2, ncol = 2)
+
+test1 = c(2,1)
+test2 = c(3,2)
+
+for (i in 1:2) {
+  
+  for (j in 1:2) {
+    a2 = fisher.test(matrix(c(final[i,j+1], final[test1[i],j+1], final[i,test2[j]], final[test1[i],test2[j]]), 2, 2), alternative='less')
+    pval[i,j] = a2$p.value
+    oddr[i,j] = as.numeric(a2$estimate)
+  }
+  
+  for (j in 1:2) {
+    a2 = fisher.test(matrix(c(final[i,j+1], final[test1[i],j+1], final[i,test2[j]], final[test1[i],test2[j]]), 2, 2), alternative='greater')
+    pval[i,j+2] = a2$p.value
+  }
+  
+}
+
+colnames(pval) = c("Under_representation_target_gene_Change", "Under_representation_target_gene_No Change",
+                   "Target Gene Change", "Target Gene No Change")
+rownames(pval) = c("TF Change", "TF No Change")
+colnames(oddr) = c("Change", "No Change")
+rownames(oddr) = c("TF Change", "TF No Change")
+
+pval[,3:4] %>% 
+  kable(caption = "Tableau des pValues (Over representation)") %>% 
+  kable_styling(full_width = FALSE, position = "float_left")
+
+oddr %>% 
+  kable(caption = "Tableau des odd ratio") %>% 
+  kable_styling(full_width = FALSE, position = "right")
+```
+</div>
+
+\
+<div class = "grey"> 
+**- Enregistrement des matrices de sortie**
+```{r, Enregistrement des matrices, eval = FALSE}
+write.table(final, "output/05h_vs_24h/TF_GeneExpr_numbers_05_24.csv", row.names = T, col.names = NA, sep = "\t")
+write.table(pval,  "output/05h_vs_24h/TF_GeneExpr_pval_05_24.csv", row.names = T, col.names = NA, sep = "\t")
+write.table(oddr,  "output/05h_vs_24h/TF_GeneExpr_oddsratio_05_24.csv", row.names = T, col.names = NA, sep = "\t")
+```
+</div>
+
+
+<br><br><br> <!--Pour avoir un espace entre les grandes parties-->
+
+
+
+### .Scripts annexes (non vérifiés) 
+  
+Ravi a produit un script similaire au précédent, mais il y a ajouté un TF-cutoff que je n'ai pas réussi à interpréter correctement. Par conséquent ce script n'a pas été plus développé que ça. \
+
+<div class = "grey"> 
+Script : Transcription factors vs gene expression (change & NoChange - Ciblée gènes - TF cutoff)
+```{r Transcription factors vs gene expression (change & NoChange - Ciblée gènes - TF cutoff),eval=F}
+
+# Indication du cutoff choisi dans le tableau 
+tf_cutoff = 50
+
+gene = data.frame(Gene = expr$symbol, Z = Z_score, stringsAsFactors = F)
+gene$N.TFs = 0
+gene$C.N.TFs = 0
+gene$NC.N.TFs = 0
+
+for (i in 1:length(gene$Gene)) {
+  test = prom_gene_fantom[prom_gene_fantom$gene==gene$Gene[i],]
+  test2 = tf_prom[tf_prom$promoter %in% test$promoter,]
+  
+  if (nrow(test2)>0) {
+    gene$N.TFs[i] = length(unique(test2$tf))
+    gene$C.N.TFs[i] = length(intersect(test2$tf, tf_change_list[[1]]$tf))
+    gene$NC.N.TFs[i] = length(intersect(test2$tf, tf_change_list[[2]]$tf))
+  }
+}
+
+gene$P = (gene$C.N.TFs/gene$N.TFs)*100
+
+nos = matrix(0, nrow = 2, ncol = 3)
+
+nos[1,1] = length(intersect(which(gene$N.TFs>0), which(gene$P>tf_cutoff)))
+nos[1,2] = length(intersect(intersect(which(gene$N.TFs>0), which(gene$P>tf_cutoff)),union(which(gene$Z>z_cutoff), which(gene$Z<(-z_cutoff)))))
+nos[1,3] = length(intersect(intersect(which(gene$N.TFs>0), which(gene$P>tf_cutoff)),intersect(which(gene$Z<z_cutoff), which(gene$Z>(-z_cutoff)))))
+nos[2,1] = length(intersect(which(gene$N.TFs>0), which(gene$P<=tf_cutoff)))
+nos[2,2] = length(intersect(intersect(which(gene$N.TFs>0), which(gene$P<=tf_cutoff)),union(which(gene$Z>z_cutoff), which(gene$Z<(-z_cutoff)))))
+nos[2,3] = length(intersect(intersect(which(gene$N.TFs>0), which(gene$P<=tf_cutoff)),intersect(which(gene$Z<z_cutoff), which(gene$Z>(-z_cutoff)))))
+
+pval = matrix(0,nrow = 2, ncol = 4)
+oddr = matrix(0,nrow = 2, ncol = 2)
+
+test1 = c(2,1)
+test2 = c(3,2)
+
+for (i in 1:2) {
+  for (j in 1:2) {
+    a2 = fisher.test(matrix(c(nos[i,j+1], nos[test1[i],j+1], nos[i,test2[j]], nos[test1[i],test2[j]]), 2, 2), alternative='less')
+    pval[i,j] = a2$p.value
+    oddr[i,j] = as.numeric(a2$estimate)
+  }
+
+  for (j in 1:2) {
+    a2 = fisher.test(matrix(c(nos[i,j+1], nos[test1[i],j+1], nos[i,test2[j]], nos[test1[i],test2[j]]), 2, 2), alternative='greater')
+    pval[i,j+2] = a2$p.value
+  }
+}
+
+
+colnames(pval) = c("Change", "No Change","Change", "No Change")
+rownames(pval) = c("TF Change", "TF No Change")
+
+colnames(oddr) = c("Change", "No Change")
+rownames(oddr) = c("TF Change", "TF No Change")
+
+write.table(nos, paste("TF_GeneExpr_numbers_",tf_cutoff,".txt", sep = "", collapse = ""), row.names = T, col.names = NA, sep = "\t")
+write.table(pval,  paste("TF_GeneExpr_pval_",tf_cutoff,".txt", sep = "", collapse = ""), row.names = T, col.names = NA, sep = "\t")
+write.table(oddr,  paste("TF_GeneExpr_oddsratio_",tf_cutoff,".txt", sep = "", collapse = ""), row.names = T, col.names = NA, sep = "\t")
+```
+</div>
+
+
+<br><br><br> <!--Pour avoir un espace entre les grandes parties-->
+
+
+
+## .Facteurs de transcription vs configuration promoteur vs expression génique  
+  
+### .Script de Ravi réorganisé avec nos données
+
+Cette partie débute en chargeant les objets générés dans les précédents scripts :  \
+  
+- **Zscore_all_genes_value_vector_05_24_final** => Vecteur (Z_score) de tous les Zscores moyens calculés en RNAseq  
+- **list_tf_to_prom_and_Gene_expr_Zscore_05_24_UpConfidence_final** => liste à 2 éléments (TF_change_list) 
+    + L'un contient tous les tf dont le Zscore est significatif et l'ensemble des promoteurs qu'ils visent.  
+    + L'autre contient tous les tf dont le Zscore est non significatif et l'ensemble des promoteurs qu'ils visent. 
+- **list_prom_config_and_Gene_expr_Zscore_05_24_final** => liste à 4 éléments (peaks_condition) 
+   + Chaque élément est une configuration de promoteur, contenant les promoteurs, ainsi que toutes les informations des gènes associés.  
+
+<div class = "grey">
+**- Chargement des données d'entrée**
+```{r, eval = TRUE}
+#z_cutoff = 2
+### Load des list de prom et de TF associés au gènes et aux Zscore générés dans le précédents chunks
+load("intermediary_generated_files/Zscore_all_genes_value_vector_05_24.rda")
+load("intermediary_generated_files/list_tf_to_prom_and_Gene_expr_Zscore_05_24.rda")
+load("intermediary_generated_files/list_prom_config_and_Gene_expr_Zscore_05_24.rda")
+```
+</div>
+
+```{r, Remplisage de la matrice final gene TF et promoteur, eval = TRUE}
+peaks_condition_tf_change = list()
+final = matrix(0,nrow = 8, ncol = 4)
+
+for (j in 1:length(peaks_condition)) {
+  
+  # Récupère uniquement les peaks dont les promoteurs ont été détectés comme associés avec des TF qui sont DE (TF_change_list[[1]] = TF change)
+  peaks_condition_tf_change[[j]] = peaks_condition[[j]][peaks_condition[[j]]$promoter %in% tf_change_list[[1]]$promoter,]
+  # Rajoute le nom du TF associé au promoteur
+  peaks_condition_tf_change[[j]]$TF = tf_change_list[[1]]$tf[match(peaks_condition_tf_change[[j]]$promoter,tf_change_list[[1]]$promoter)]
+  
+  # Récupère le nb de gènes différents qui apparaissent dans open open (qaund j = 1) ==> 11982
+  final[j,1] = length(unique(peaks_condition[[j]]$gene))
+  # Nb de gènes dont le prom est open-open avec un Zscore significatif pour le TF associé
+  final[j,2] = length(unique(peaks_condition_tf_change[[j]]$gene))
+  # Nb de gènes DE (parce que union des conditions qui dépassent le Zcutoff) qui ont un TF change (parce que TF_change_list[[1]] = TF change)
+  final[j,3] = length(unique(peaks_condition_tf_change[[j]]$gene[union(which(peaks_condition_tf_change[[j]]$Z_score > z_cutoff), 
+                                                                       which(peaks_condition_tf_change[[j]]$Z_score < (-z_cutoff)))]))
+  # Nb de gènes DE (parce que union des conditions qui dépassent le Zcutoff) qui ont un TF change (parce que TF_change_list[[1]] = TF change)
+  final[j,4] = length(unique(peaks_condition_tf_change[[j]]$gene[which(peaks_condition_tf_change[[j]]$Z_score<z_cutoff & peaks_condition_tf_change[[j]]$Z_score>(-z_cutoff))]))
+  
+   }
+
+peaks_condition_tf_change2 = list()
+
+for (j in 1:length(peaks_condition)) {
+  
+  # Récupère uniquement les peaks dont les prmoteurs ont  été détectés comme associés avec des TF qui sont pas DE (TF_change_list[[2]] = TF no_change)
+  peaks_condition_tf_change2[[j]] = peaks_condition[[j]][peaks_condition[[j]]$promoter %in% tf_change_list[[2]]$promoter,]
+  # Rajoute le nom du TF associé au promoteur
+  peaks_condition_tf_change2[[j]]$TF = tf_change_list[[2]]$tf[match(peaks_condition_tf_change2[[j]]$promoter,tf_change_list[[2]]$promoter)]
+
+  # Récupère le nb de gènes différents qui apparaissent dans open open (qaund j = 1) ==> 11982
+  final[4+j,1] = length(unique(peaks_condition[[j]]$gene))
+  # Récupère le nb total de gènes avec un TF no Change qui n'apparaissent pas déjà dans le tableau change
+  # Les gènes déjà comptés avec le tableau TF_change ne le sont plus s'ils apparaisent dans le tableau TF_no_change
+  # Ils ne sont comptés que si uniquement dans le tableau TF_no change
+  final[4+j,2] = length(setdiff(peaks_condition_tf_change2[[j]]$gene,
+                                peaks_condition_tf_change[[j]]$gene))
+  # Nb de gène DE mais dont le TF n'est pas DE et qui n'apparaît pas déjà dans la première boucle avec les TF DE
+  final[4+j,3] = length(setdiff(
+    peaks_condition_tf_change2[[j]]$gene[union(which(peaks_condition_tf_change2[[j]]$Z_score>z_cutoff), which(peaks_condition_tf_change2[[j]]$Z_score<(-z_cutoff)))],   
+    peaks_condition_tf_change[[j]]$gene[union(which(peaks_condition_tf_change[[j]]$Z_score>z_cutoff), which(peaks_condition_tf_change[[j]]$Z_score<(-z_cutoff)))]))
+  # Nb de gène non-DE mais dont le TF n'est pas DE et qui n'apparaît pas déjà dans la première boucle avec les TF DE
+  final[4+j,4] = length(setdiff(
+    peaks_condition_tf_change2[[j]]$gene[which(peaks_condition_tf_change2[[j]]$Z_score<z_cutoff & peaks_condition_tf_change2[[j]]$Z_score>(-z_cutoff))],
+    peaks_condition_tf_change[[j]]$gene[which(peaks_condition_tf_change[[j]]$Z_score<z_cutoff & peaks_condition_tf_change[[j]]$Z_score>(-z_cutoff))]))
+  
+}
+
+colnames(final) = c("All_genes_in_condition","All_genes_in_TF_change", "Gene Change", "Gene No Change")
+rownames(final) = c("TF_change-Open_Open", "TF_change-Open_Close", "TF_change-Close_Open", "TF_change-Close_Close",
+                    "TF_no_change-Open_Open", "TF_no_change-Open_Close", "TF_no_change-Close_Open", "TF_no_change-Close_Close")
+
+# Exemple de pourquoi on fait le setDiff:
+  
+# ABCD1 TF1  TF_change      Zscore_Gene_DE
+# ABCD1 TF2  TF_no_change   Zscore_Gene_DE ==> Ne doit pas être compté Nb de gène DE mais dont le TF n'est pas DE car le même gene apparaît dajà ds le TF_change
+
+# ABCD2 TF1  TF_change      Zscore_Gene_no_DE
+# ABCD2 TF2  TF_no_change   Zscore_Gene_no_DE ==> Ne doit pas être compté Nb de gène non-DE mais dont le TF n'est pas DE car le même gene apparaît dajà ds le TF_change
+
+
+### Print le nombre de gène ciblés par un TF (change ou pas change) dans chaque catégorie de promoteur
+
+df_nb_prom_targeted_by_TF = tibble(Prom_config = c("Open-Open", "Open-Close", "Close-Open", "Close_Close"),
+                                   Nb_prom = final[1:4,1],
+                                   Nb_change_TF_targeted_genes_found = final[1:4,2],
+                                   Nb_No_change_TF_targeted_genes_found = final[5:8,2]) %>%
+                            mutate(nb_gene_without_targetting_TF_found = Nb_prom-(Nb_change_TF_targeted_genes_found+Nb_No_change_TF_targeted_genes_found ))
+
+
+df_nb_prom_targeted_by_TF %>% 
+  kable(caption = "Gènes ciblés par un TF (change/no_change) vs correspondance avec les promoteurs (par config)") %>%
+  kable_styling()%>%
+  scroll_box(width = "100%")
+```
+
+\
+La première chose qu'il faut noter est que lorsque l'on fait la correspondance catégorie par catégorie des configurations de promoteurs avec les TF qui les ciblent, on note que la somme des gènes présents dans les catégories de configuration de promoteurs est plus élevée que la somme des gènes ciblés par les TF qui sont associés à ces derniers. \
+==> Cela veut dire qu'**une partie des promoteurs de FANTOM n'est pas retrouvée dans la liste des promoteurs ciblés par des TF** (avec le score de confiance choisi). \
+==> On note que leur nombre représente parfois une part non négligeable (voir tableau). \
+\
+Rappellons également qu'un gène peut apparaître dans plusieurs catégories de configuration promoteur (s'il est sous contrôle de promoteurs différents avec des dynamiques différentes). Cela a pour conséquence que **ENTRE LES CATEGORIES certains gènes peuvent parfois être comptés à la fois dans TF_change et dans TF_no_Change**. En effet, si un gène qui change à un promoteur open-open avec un TF qui change alors il sera comptabilisé dans la catégorie "open-open/TF_change/Gene_change. Mais si ce dernier a également un promoteur dans open_close qui lui est visé par un TF qui No_Change, alors ce même gène sera comptabilisé dans la catégorie "open-close/TF_no_change/Gene_change. Si cet autre TF change lui aussi alors le même gène sera comptabilisé 2 fois dans la catégorie TF_change. C'est pour cela que la somme des TF_change (8720) dépasse celle indiquée dans le tableau où ne prend que en compte les TF change vs Expression (6356).
+
+```{r, Gene ChangeNochange vs categorie vs TF ChangeNochange, eval = TRUE}
+
+df_nb_gene_all = tibble(TF_statut = c(rep("TF_change",4),rep(rep("TF_no_change",4))),
+                        Prom_config = rep(c("Open-Open", "Open-Close", "Close-Open", "Close_Close"),2),
+                        Nb_targeted_genes_change = final[,3],
+                        Nb_targeted_genes_No_change = final[,4])
+
+df_nb_gene_all %>% 
+  kable(caption = "Gènes change/no_change vs leur(s) TF (change/no_change) vs prom config") %>%
+  kable_styling()
+
+```
+
+```{r, Plot pourcentage de genes par categorie, eval = TRUE}
+
+sum_gene_change = sum(df_nb_gene_all$Nb_targeted_genes_change)
+
+df_plot = df_nb_gene_all %>% mutate(prop_change = round((Nb_targeted_genes_change/sum_gene_change)*100,1))
+df_plot$TF_statut = as_factor(df_plot$TF_statut)
+df_plot$Prom_config = as_factor(df_plot$Prom_config)
+
+# ggplot(data = df_plot, aes(x = Prom_config, y = prop_change, fill = TF_statut)) +
+#   geom_bar(stat = "identity", position ="dodge") +
+#   geom_text(aes(label = prop_change), position=position_dodge(width=0.9), vjust=-0.25) +
+#   geom_text(data = subset(df_plot, TF_statut == "TF_change" & Prom_config == "Open-Open"), 
+#             aes(label = "***"), 
+#             vjust = -1, hjust = 1, size = 10) +
+#   scale_y_continuous(name = "% of gene in category", limits = c(0,100), breaks = seq(from = 0, to = 100, by = 10))
+
+ggplot(data = df_plot, aes(x = Prom_config, y = Nb_targeted_genes_change, fill = TF_statut)) +
+  geom_bar(stat = "identity", position ="dodge") +
+  ylim(0,3000) +
+  geom_text(aes(label = Nb_targeted_genes_change), position=position_dodge(width=0.9), vjust=-0.25) +
+  geom_text(data = subset(df_plot, TF_statut == "TF_change" & Prom_config == "Open-Open"), 
+            aes(label = "***"), 
+            vjust = -0.5, hjust = 1.1, size = 10)
+```
+
+```{r, Matrices pvalue et oddratio avec TF, eval = TRUE }
+pval = matrix(0, nrow =8, ncol = 4)
+oddr = matrix(0, nrow= 8, ncol = 2)
+test1 = c(5,6,7,8,1,2,3,4)
+test2 = c(4,3)
+
+for (i in 1:8) {
+  for (j in 1:2) {
+
+    hitInSample = final[i,j+2]
+    hitInPop = final[test1[i],j+2]+final[i,j+2]
+    failInPop = final[i,test2[j]]+final[test1[i],test2[j]]
+    sampleSize = final[i,3]+final[i,4]
+
+    a2 = fisher.test(matrix(c(hitInSample, hitInPop-hitInSample, sampleSize-hitInSample, failInPop-sampleSize +hitInSample), 2, 2), alternative='less')
+    pval[i,j] = a2$p.value
+    oddr[i,j] = as.numeric(a2$estimate)
+  }
+  for (j in 1:2) {
+
+    hitInSample = final[i,j+2]
+    hitInPop = final[test1[i],j+2]+final[i,j+2]
+    failInPop = final[i,test2[j]]+final[test1[i],test2[j]]
+    sampleSize = final[i,3]+final[i,4]
+
+    a2 = fisher.test(matrix(c(hitInSample, hitInPop-hitInSample, sampleSize-hitInSample, failInPop-sampleSize +hitInSample), 2, 2), alternative='greater')
+    pval[i,j+2] = a2$p.value
+  }
+}
+
+colnames(pval) = c("under_reprez_target_gene_change",
+  "under_reprez_target_gene_No_change",
+  "Target Gene change",
+  "Target Gene No change")
+rownames(pval) = c("TF_change-Open_Open", "TF_change-Open_Close", "TF_change-Close_Open", "TF_change-Close_Close",
+                    "TF_no_change-Open_Open", "TF_no_change-Open_Close", "TF_no_change-Close_Open", "TF_no_change-Close_Close")
+
+colnames(oddr) = c("Change", "No Change")
+rownames(oddr) = c("TF_change-Open_Open", "TF_change-Open_Close", "TF_change-Close_Open", "TF_change-Close_Close",
+                    "TF_no_change-Open_Open", "TF_no_change-Open_Close", "TF_no_change-Close_Open", "TF_no_change-Close_Close")
+
+pval[,3:4] %>% 
+  kable(caption = "Tableau des pValues (Over Representation)") %>% 
+  kable_styling(full_width = F)
+
+oddr %>% 
+  kable(caption = "Tableau des odd ratios") %>% 
+  kable_styling(full_width = F)
+
+```
+
+\
+<div class = "grey">
+**- Enregistrement des fichiers de sortie**
+```{r, eval = FALSE}
+save(peaks_condition_tf_change,file = "intermediary_generated_files/list_TF_change_ATAC_config_Gene_Expr_Zscore_05_24.rda")
+save(peaks_condition_tf_change2,file = "intermediary_generated_files/list_TF_Nochange_ATAC_config_Gene_Expr_Zscore_05_24.rda")
+write.table(final, "output/05h_vs_24h/TF_ATAC_GeneExpr_numbers_05_24.csv", row.names = T, col.names = NA, sep = "\t")
+write.table(pval,  "output/05h_vs_24h/TF_ATAC_GeneExpr_pval_05_24.csv", row.names = T, col.names = NA, sep = "\t")
+write.table(oddr,  "output/05h_vs_24h/TF_ATAC_GeneExpr_oddsratio_05_24.csv", row.names = T, col.names = NA, sep = "\t")
+```
+</div>
+
+<br><br><br> <!--Pour avoir un espace entre les grandes parties-->
+
+
+
+### .Script annexes (non vérifiés)
+
+<div class = "grey">
+Script : Transcription factors vs promoter configuration vs expression (change & Nochange - ciblée promoteurs)
+```{r Transcription factors vs promoter configuration vs expression (change & Nochange - ciblée promoteurs), eval=F }
+
+final = matrix(0,nrow = 8, ncol = 4)
+for (j in 1:length(peaks_condition)) {
+  final[j,1] = length(unique(peaks_condition[[j]]$promoter))
+  final[j,2] = length(unique(peaks_condition_tf_change[[j]]$promoter))
+  final[j,3] = length(unique(peaks_condition_tf_change[[j]]$promoter[union(which(peaks_condition_tf_change[[j]]$Z_score>z_cutoff), which(peaks_condition_tf_change[[j]]$Z_score<(-z_cutoff)))]))
+  final[j,4] = length(unique(peaks_condition_tf_change[[j]]$promoter[which(peaks_condition_tf_change[[j]]$Z_score<z_cutoff & peaks_condition_tf_change[[j]]$Z_score>(-z_cutoff))]))
+}
+
+for (j in 1:length(peaks_condition)) {
+  final[4+j,1] = length(unique(peaks_condition[[j]]$promoter))
+  final[4+j,2] = length(setdiff(peaks_condition_tf_change2[[j]]$promoter,peaks_condition_tf_change[[j]]$promoter))
+  final[4+j,3] = length(setdiff(peaks_condition_tf_change2[[j]]$promoter[union(which(peaks_condition_tf_change2[[j]]$Z_score>z_cutoff), which(peaks_condition_tf_change2[[j]]$Z_score<(-z_cutoff)))], peaks_condition_tf_change[[j]]$promoter[union(which(peaks_condition_tf_change[[j]]$Z_score>z_cutoff), which(peaks_condition_tf_change[[j]]$Z_score<(-z_cutoff)))]))
+  final[4+j,4] = length(setdiff(peaks_condition_tf_change2[[j]]$promoter[which(peaks_condition_tf_change2[[j]]$Z_score<z_cutoff & peaks_condition_tf_change2[[j]]$Z_score>(-z_cutoff))],peaks_condition_tf_change[[j]]$promoter[which(peaks_condition_tf_change[[j]]$Z_score<z_cutoff & peaks_condition_tf_change[[j]]$Z_score>(-z_cutoff))] ))
+}
+colnames(final) = c("All_promoters_in_condition","All_promoters_in_TF_change", "TF Change", "TF No Change")
+rownames(final) = c("Open_Open", "Open_Close", "Close_Open", "Close_Close","Open_Open", "Open_Close", "Close_Open", "Close_Close")
+
+
+pval = matrix(0, nrow =8, ncol = 4)
+oddr = matrix(0, nrow= 8, ncol = 2)
+test1 = c(5,6,7,8,1,2,3,4)
+test2 = c(4,3)
+for (i in 1:8) {
+  for (j in 1:2) {
+
+    hitInSample = final[i,j+2]
+    hitInPop = final[test1[i],j+2]+final[i,j+2]
+    failInPop = final[i,test2[j]]+final[test1[i],test2[j]]
+    sampleSize = final[i,3]+final[i,4]
+
+    a2 = fisher.test(matrix(c(hitInSample, hitInPop-hitInSample, sampleSize-hitInSample, failInPop-sampleSize +hitInSample), 2, 2), alternative='less')
+    pval[i,j] = a2$p.value
+    oddr[i,j] = as.numeric(a2$estimate)
+  }
+  for (j in 1:2) {
+
+    hitInSample = final[i,j+2]
+    hitInPop = final[test1[i],j+2]+final[i,j+2]
+    failInPop = final[i,test2[j]]+final[test1[i],test2[j]]
+    sampleSize = final[i,3]+final[i,4]
+
+    a2 = fisher.test(matrix(c(hitInSample, hitInPop-hitInSample, sampleSize-hitInSample, failInPop-sampleSize +hitInSample), 2, 2), alternative='greater')
+    pval[i,j+2] = a2$p.value
+  }
+}
+setwd("D:/Sincity/Final - Copy//Results/05_24/Promoters/")
+write.table(final, "TF_ATAC_GeneExpr_numbers.txt", row.names = T, col.names = NA, sep = "\t")
+write.table(pval,  "TF_ATAC_GeneExpr_pval.txt", row.names = T, col.names = NA, sep = "\t")
+write.table(oddr,  "TF_ATAC_GeneExpr_oddsratio.txt", row.names = T, col.names = NA, sep = "\t")
+```
+Script : Transcription factors vs promoter configuration vs expression (change & Nochange - ciblée promoteurs - TF cutoff)
+```{r Transcription factors vs promoter configuration vs expression (change & Nochange - ciblée promoteurs - TF cutoff), eval=F}
+
+final_new = matrix(0,nrow = 8, ncol = 3)
+
+for (z in 1:length(peaks_condition_tf_change)) {
+  
+  test = rbind(peaks_condition_tf_change[[z]], peaks_condition_tf_change2[[z]])
+  test2 = data.frame(Gene = unique(test$gene), stringsAsFactors = F)
+  test2$N.TFs = 0
+  test2$C.N.TFs = 0
+  test2$NC.N.TFs = 0
+  
+  for (i in 1:length(test2$Gene)) {
+    
+    test3 = test[test$gene==test2$Gene[[i]],]
+    test2$N.TFs[i] = length(unique(test3$TF))
+    test2$C.N.TFs[i] = length(intersect(test3$TF, tf_change_list[[1]]$tf))
+    test2$NC.N.TFs[i] = length(intersect(test3$TF, tf_change_list[[2]]$tf))
+
+  }
+  
+  test2$P = (test2$C.N.TFs/test2$N.TFs)*100
+  test2$Z = test$Z_score[match(test2$Gene, test$gene)]
+  final_new[z,1] = length(test2$Gene[test2$P>tf_cutoff])
+  final_new[z,2] = length(test2$Gene[intersect(which(test2$P>tf_cutoff),union(which(test2$Z>z_cutoff), which(test2$Z<(-z_cutoff))))])
+  final_new[z,3] = length(test2$Gene[intersect(which(test2$P>tf_cutoff),intersect(which(test2$Z<z_cutoff), which(test2$Z>(-z_cutoff))))])
+  final_new[z+4,1] = length(test2$Gene[test2$P<=tf_cutoff])
+  final_new[z+4,2] = length(test2$Gene[intersect(which(test2$P<=tf_cutoff),union(which(test2$Z>z_cutoff), which(test2$Z<(-z_cutoff))))])
+  final_new[z+4,3] = length(test2$Gene[intersect(which(test2$P<=tf_cutoff),intersect(which(test2$Z<z_cutoff), which(test2$Z>(-z_cutoff))))])
+  
+}
+
+colnames(final_new) = c("All_genes_in_TF_change", "TF Change", "TF No Change")
+rownames(final_new) = c("Open_Open", "Open_Close", "Close_Open", "Close_Close","Open_Open", "Open_Close", "Close_Open", "Close_Close")
+
+
+pval = matrix(0, nrow =8, ncol = 4)
+oddr = matrix(0, nrow= 8, ncol = 2)
+test1 = c(5,6,7,8,1,2,3,4)
+test2 = c(3,2)
+
+for (i in 1:8) {
+  for (j in 1:2) {
+
+    hitInSample = final_new[i,j+1]
+    hitInPop = final_new[test1[i],j+1]+final_new[i,j+1]
+    failInPop = final_new[i,test2[j]]+final_new[test1[i],test2[j]]
+    sampleSize = final_new[i,2]+final_new[i,3]
+
+    a2 = fisher.test(matrix(c(hitInSample, hitInPop-hitInSample, sampleSize-hitInSample, failInPop-sampleSize +hitInSample), 2, 2), alternative='less')
+    pval[i,j] = a2$p.value
+    oddr[i,j] = as.numeric(a2$estimate)
+  }
+  for (j in 1:2) {
+
+    hitInSample = final_new[i,j+1]
+    hitInPop = final_new[test1[i],j+1]+final_new[i,j+1]
+    failInPop = final_new[i,test2[j]]+final_new[test1[i],test2[j]]
+    sampleSize = final_new[i,2]+final_new[i,3]
+
+    a2 = fisher.test(matrix(c(hitInSample, hitInPop-hitInSample, sampleSize-hitInSample, failInPop-sampleSize +hitInSample), 2, 2), alternative='greater')
+    pval[i,j+2] = a2$p.value
+  }
+}
+
+write.table(final_new, paste("TF_ATAC_GeneExpr_numbers_",tf_cutoff,".txt", sep = "", collapse = ""), row.names = T, col.names = NA, sep = "\t")
+write.table(pval,  paste("TF_ATAC_GeneExpr_pval_",tf_cutoff,".txt", sep = "", collapse = ""), row.names = T, col.names = NA, sep = "\t")
+write.table(oddr,  paste("TF_ATAC_GeneExpr_oddsratio_",tf_cutoff,".txt", sep = "", collapse = ""), row.names = T, col.names = NA, sep = "\t")
+```
+</div>
+
+
+<br><br><br> <!--Pour avoir un espace entre les grandes parties-->
+
+**********************************************************************************************************
+
+Ce script a pour but de présenter et de comprendre les résultats obtenus pour l'analyse MARS ATAC à partir des scripts de Ravi. \
+Le data set avec lequel nous travaillons finalement est : Spread_MARSseq_data_all_filters_20200728.csv. Ce dernier comprend tous les filtres appliqués sur les UMI, les reads...etc (cf. nom du script : ) \
+
+
+<div class = "grey">
+**- Chargement des packages utiles pour le code**
+```{r package and functions,message=F, warning=F, eval=T}
+
+library(tidyverse)
+library(biomaRt)
+
+```
+**- Définition de l'environnement de travail et chargement des données d'entrée**
+```{r working directory and data input, eval = TRUE}
+
+working_directory = "/home/romuald/Bureau/Analyses_MARS-ATAC/TF_vs_Prom_vs_Expr_redo/"
+setwd(working_directory)
+
+z_cutoff = 2 
+
+# Ancienne table de données
+# expression_data <- read.csv2("old_expression_data.csv")# Structure à copier avec nos nouvelles data
+
+# Nouvelle table de données : version "large" de nos données
+# 826 lignes (pour 826 cellules au total) et 14049 colonnes (pour 14049 gènes détectés en tout)
+Spread_MARSseq_data_all_filters_20200728 <- read.csv("input_files/Spread_MARSseq_data_all_filters_20200728.csv", dec = ",")
+
+```
+</div>
+
+**********************************************************************************************************
+
+<br><br><br> <!--Pour avoir un espace entre les grandes parties-->
+
+
+# .Interval 24h --> 48h  
+
+## .Calcul du Zscore moyen pour chaque gène  
+
+\
+*Rappel sur le Zscore : le calcul du Zscore nous permet ici de déterminer s'il y a eu un changement significatif (augmentation ou diminution) dans l'expression des gènes entre les deux points de temps étudiés. Le calcul du Zscore suit la formule suivante : (moyenne_temps2 - moyenne_temps1) / (sqrt(sd_temps1² + sd_temps2²)/sqrt(n)) avec n le nombre total de cellules étudiées pour chaque point de temps.* \
+D'après la formule, on observe que n_temps1 est supposé être égal à n_temps2 ce qui n'est pas tout à fait exact pour notre jeu de donnée. Dans le script initial, Ravi avait approximé l'effectif à 100. Pour limiter le biais, nous avons ici décidé d'utiliser la moyenne du nb de cellule entre les deux points de temps pour chaque donneur (voir chunk). On calcule pour chaque gène le Zscore par donneur puis on effectue la moyenne du Zscore entre les donneurs. \
+
+<div class = "grey">
+**- Chargement et initialisation des données d'entrée**
+```{r, eval = TRUE}
+
+# Load data MARSseq (issu de Spread_MARSseq_data_all_filters_20200728) arrangé pour fonctionner avec script Ravi
+load("intermediary_generated_files/Arranged_Spread_MARSseq_data_all_filters_20200728.rda")
+expr = wider_data_grouped
+rm(wider_data_grouped)
+
+## Cutoff du Z score
+# z_cutoff = 2  # initialisé dans le chunk général en haut du code
+## Cutoff du Z score
+n_cell_d1 = (78+93)/2
+n_cell_d2 = (95+88)/2
+```
+**- Calcul du Zscore pour chaque gène**
+```{r, eval = T}
+## Calcul du Z score par gene 
+donor1_mean_diff = (expr$X48Hrs_1_mean_UMI - expr$X24Hrs_1_mean_UMI) # numérateur du Zscore
+donor1_standard_error = sqrt((expr$X24Hrs_1_sd_UMI)^2 + (expr$X48Hrs_1_sd_UMI)^2)/sqrt(n_cell_d1)  # Dénominateur du Zscore
+donor1_Z = donor1_mean_diff/donor1_standard_error
+donor1_Z[is.na(donor1_Z)] = 0
+
+donor2_mean_diff = (expr$X48Hrs_2_mean_UMI - expr$X24Hrs_2_mean_UMI) # numérateur du Zscore
+donor2_standard_error = sqrt((expr$X24Hrs_2_sd_UMI)^2 + (expr$X48Hrs_2_sd_UMI)^2)/sqrt(n_cell_d2)  # Dénominateur du Zscore
+donor2_Z = donor2_mean_diff/donor2_standard_error
+donor2_Z[is.na(donor2_Z)] = 0
+
+# Moyenne des Zscores pour les deux donneurs pour chaque gene
+Z_score = (donor1_Z+donor2_Z)/2 # un vecteur avec la moyenne des Zscore pour chaque gene (dans le même ordre que les gènes de expr)
+```
+**- Enregistrement du vecteur de Zscore**
+```{r, eval = F}
+save(Z_score, file = "intermediary_generated_files/Zscore_all_genes_value_vector_24_48.rda")
+```
+</div>
+
+\
+On obtient en sortie un vecteur avec tous les Z_score rangés dans l'ordre des gènes du tableau Arranged_Spread_MARSseq_data_all_filters_20200728. Il s'agit du fichier : Zscore_all_genes_value_vector_24_48.rda \
+\
+
+**Affichage des Zscores calculés**
+```{r, eval = TRUE}
+
+cat("Entre 24h et 48h, il y a : \n",
+    length(which(Z_score>2)),"gènes dont le Zscore est supérieur à 2. \n",
+    length(which(Z_score>2)),"gènes dont le Zscore est supérieur à 2. \n",
+    length(Z_score) - length(which(Z_score>2)) - length(which(Z_score<(-2))),"gènes dont le Zscore est non significatif.")
+
+```
+\
+Le cutoff du Zscore étant défini à 2, les gènes dont le Zscore est compris entre -2 et 2 ne sont pas significatifs : il n'y a pas de différence d'expression notable entre les deux points de temps testés. Toutefois, pour les gènes dont Zscore < -2,  alors il y a une diminution significative d'expression et si Zscore > 2 alors il s'agit d'une augmentation significative d'expression entre les deux points de temps. \
+Par la suite, on utilisera les dénominations suivantes : \
+
+- -2 < Zscore < 2 = non significatif = No change in gene expression
+- Zscore < -2 ou Zscore > 2 = significatif = Change in gene expression
+
+
+```{r, eval = TRUE}
+
+total = c( # total gene with zscore
+  length(which(Z_score<(-z_cutoff) | Z_score>z_cutoff)), 
+  length(-which(Z_score>(-z_cutoff) & Z_score<z_cutoff)),
+  length(Z_score)
+  )
+
+df_nb_gene_change_nochange = tibble(Z_score = c("Change", "No_change", "Total"), Nb_gene = total)
+
+df_nb_gene_change_nochange %>% 
+  kable(caption = "Nombre de gènes Change/NoChange (détectés en RNAseq)") %>%
+  kable_styling(full_width = F)
+
+# rm(list = ls()) # Effacer tous les objets créés dans l'espace de travail
+```
+
+
+
+<br><br><br> <!--Pour avoir un espace entre les grandes parties-->
+
+
+
+## .Configuration du promoteur vs expression génique  
+
+### .Script de Ravi réorganisé avec nos données  
+\
+Cette partie de l'analyse commence par charger le fichier "prom_peaks_overlap.rda".  \
+==> Il s'agit d'une liste correspondant aux points de temps 05h, 24h et 48h en ATAC-seq. \
+==> Chaque élément de la liste est un tableau avec l'ensemble des promoteurs de la base de données FANTOM (**123 440 promoteurs** qui correspondent à **16 887** noms de gènes uniques) additionné de l'information de l'overlap (1 = oui | 0 = non) d'un de nos peaks ATACseq à ce point de temps. Cet overlap avec la base de donnée FANTOM a été réalisé dans un autre script que Ravi ne nous a pas fourni. Mais il s'agit simplement d'un overlap réalisé avec Grange. \
+
+<div class = "grey">
+**- Chargement des inputs**
+```{r, Chargement des trois fichiers input, eval = TRUE}
+
+# Load data MARSseq (issu de Spread_MARSseq_data_all_filters_20200728) arrangé pour fonctionner avec script Ravi
+load("intermediary_generated_files/Arranged_Spread_MARSseq_data_all_filters_20200728.rda")
+expr = wider_data_grouped
+rm(wider_data_grouped)
+
+# Load du vecteur de Zscore
+load("intermediary_generated_files/Zscore_all_genes_value_vector_24_48.rda")
+
+# Load de la liste des promoteurs (123440) avec info relatives + overlap des peaks ATAC à 5h, 24h et 48h
+load("input_files/prom_peaks_overlap.rda")
+## Colonne PeakOverlap : si 0 ça veut dire qu'on a pas de peak qui tombe dans le promoteur à ce temps là
+#                        si 1 alors peak tombe dans le promoteur
+
+```
+</div>
+
+
+```{r, Description donnees ATAC, eval = TRUE}
+# On créé le tableau générique de tous les promoteurs sans les overlap
+Overlap = prom_peaks_overlap[[1]][,-c(9)] 
+
+# On rajoute les overlap de nos peaks sur les promoteurs
+Overlap$peakOverlap_1 = prom_peaks_overlap[[2]]$PeakOverlap ## 24Hrs
+Overlap$peakOverlap_2 = prom_peaks_overlap[[3]]$PeakOverlap ## 48Hrs
+
+distinct_prom = dplyr::distinct(Overlap, promoter, gene, peakOverlap_1, peakOverlap_2)
+
+# On créé un tableau récapitulatif
+
+df_ATAC_Fantom = data.frame(Unique_Promotors = c(length(unique(Overlap$promoter)),
+                                                 length(unique(distinct_prom[which(rowSums(distinct_prom[,c(3:4)])>0),]$promoter)),
+                                                 length(unique(distinct_prom[-which(rowSums(distinct_prom[,c(3:4)])>0),]$promoter))),
+                            Unique_Genes = c(length(unique(Overlap$gene)),
+                                             length(unique(distinct_prom[which(rowSums(distinct_prom[,c(3:4)])>0),]$gene)),
+                                             length(unique(distinct_prom[-which(rowSums(distinct_prom[,c(3:4)])>0),]$gene))))
+rownames(df_ATAC_Fantom) = c("Fantom5", "Fantom5_in_ATAC", "Fantom5_not_in_ATAC")
+
+df_ATAC_Fantom %>%
+  kable() %>%
+  kable_styling(full_width = F)
+
+print(paste("Notons qu'il y a", nrow(distinct_prom) - length(unique(Overlap$promoter)),"promoteurs qui sont associés à plus de 1 gène."))
+
+rm(prom_peaks_overlap)
+```
+
+\
+<div class = "grey">  
+**- Création des catégories de configuration (Open-Open, Open-Close...) avec Zscore associé**
+```{r, Création liste peak_condition et enregistrement, eval = F}
+
+# Définition des catégories open close pour tous les 123440 promoteurs
+peaks_condition = list()
+peaks_condition[[1]] = Overlap[which(Overlap$peakOverlap_1==1 & Overlap$peakOverlap_2==1),] # Open - Open
+peaks_condition[[2]] = Overlap[which(Overlap$peakOverlap_1==1 & Overlap$peakOverlap_2==0),] # Open - Close
+peaks_condition[[3]] = Overlap[which(Overlap$peakOverlap_1==0 & Overlap$peakOverlap_2==1),] # Close - Open
+peaks_condition[[4]] = Overlap[which(Overlap$peakOverlap_1==0 & Overlap$peakOverlap_2==0),] # Close - Close
+
+names(peaks_condition) =  c("Open_Open", "Open_Close", "Close_Open","Close_Close")
+
+# Deux boucles for imbriquées pour ajouter le Zscore qui correspond au bon gène
+# Le vecteur Zscore est dans le même ordre que le tableau expr
+# Donc on rajoute le Zscore à la fin des listes peak_condition en allant chercher dans expr avec chr et symbol
+
+timer_artificial_null = 0
+
+for (i in 1:length(peaks_condition)) {
+  peaks_condition[[i]]$Z_score = 0
+  peaks_condition[[i]]$Nature_of_Zscore = "artificial" 
+
+  for (j in 1:length(peaks_condition[[i]]$promoter)) {
+    chr = peaks_condition[[i]]$seqnames[j]
+    gene = peaks_condition[[i]]$gene[j]
+    ind = which(expr$chr == chr & expr$symbol == gene)
+    
+    if (length(ind)>0) {
+      peaks_condition[[i]]$Z_score[j] = Z_score[ind]
+      peaks_condition[[i]]$Nature_of_Zscore[j] = "TRUE"
+    }
+    
+  }
+  
+  timer_artificial_null = 0
+  
+}
+
+save(peaks_condition, file = "intermediary_generated_files/list_prom_config_and_Gene_expr_Zscore_24_48.rda" )
+
+
+```
+On obtient une liste avec 4 tableaux (un par configuration) listant tous les promoteurs et leur overlap avec ATAC et les gènes associés à chacun de ces promoteurs : list_prom_config_and_Gene_expr_Zscore_24_48.rda".
+</div>
+  
+\
+**Affichage des données**
+```{r, Matrice final nb gene vs config, eval = TRUE}
+# Car eval = FALSE dans le chunk d'avant 
+load("intermediary_generated_files/list_prom_config_and_Gene_expr_Zscore_24_48.rda")
+
+### Réalisation des matrices avec les nombres de cas (hit) pour chaque combinaison
+# z_cutoff = 2
+final = matrix(0, nrow = 5, ncol = 4)
+
+for (i in 1:length(peaks_condition)){
+  
+  # Nb gène unique par catégorie de configuration (attention possible multi-count possible dans pluseurs catégorie)
+  final[i,1] = length(unique(peaks_condition[[i]]$gene))
+  final[i,2] = length(unique(peaks_condition[[i]]$gene[-which(peaks_condition[[i]]$Z_score>(-z_cutoff) & peaks_condition[[i]]$Z_score<z_cutoff)]))
+  final[i,3] = length(unique(peaks_condition[[i]]$gene[which(peaks_condition[[i]]$Z_score>(-z_cutoff) & peaks_condition[[i]]$Z_score<z_cutoff)]))
+  final[i,4] = length(unique(peaks_condition[[i]]$gene[which(peaks_condition[[i]]$Nature_of_Zscore == "artificial")]))
+  final[5,] = c(length(Z_score),length(which(Z_score<(-z_cutoff) | Z_score>z_cutoff)),length(-which(Z_score>(-z_cutoff) & Z_score<z_cutoff)),0)
+
+}
+
+colnames(final) = c("Total","Change", "No_Change","No_mRNA_in_No_change")
+rownames(final) = c("Open_Open", "Open_Close", "Close_Open", "Close_Close", "Nb_change_nochange_dataset")
+
+final[1:4,]%>% 
+  kable(caption = "Nombre de gènes vs configuration des promoteurs") %>%
+  kable_styling(full_width = F)
+```
+
+Au total il y a **16887 gènes** diférents dans la database des promoteurs. *On remarque qu'en additionnant tous les gènes dans les différentes configurations de promoteur (somme de la colonne total), on dépasse cette valeur, on obtient 20949.* C'est parce que certains gènes sont comptés plusieurs fois dans des catégorires différentes. **Cela arrive quand un (ou plusieurs) TF vise des promoteurs différents de ce gène et que ces promoteurs ont des dynamiques différentes.** \
+
+```{r, Nombre de multicount pour les config, eval = TRUE}
+
+for(i in 1:4){
+
+count_multiple_prom = Overlap %>% 
+  distinct(gene, seqnames, peakOverlap_1, peakOverlap_2) %>% 
+  group_by(gene) %>% 
+  filter(n() == i)
+
+print(paste("Au total, il y a", length(unique(count_multiple_prom$gene)),"gènes avec", i, "attribution(s) à des config de promoteurs."))
+
+}
+```
+
+```{r, Plot proportion Gene Change pour les config, eval = TRUE, warning= FALSE}
+
+nb_gene_change_nochange_prom_config = as_tibble(unname(final[1:4,2:4]))
+nb_gene_change_nochange_prom_config$Config = c("Open_Open", "Open_Close", "Close_Open", "Close_Close")
+
+colnames(nb_gene_change_nochange_prom_config) = c("Change", "No_Change","Nb_gene_with_no_mRNA_in_No_Change","Prom_config")
+nb_gene_change_nochange_prom_config = nb_gene_change_nochange_prom_config %>%
+  dplyr::select(Prom_config, Change, No_Change, Nb_gene_with_no_mRNA_in_No_Change)
+
+sum_change = sum(nb_gene_change_nochange_prom_config$Change)
+
+plot_df = nb_gene_change_nochange_prom_config %>% group_by(Prom_config) %>% mutate(prop_change = round((Change/sum_change)*100,1))
+plot_df$Prom_config = factor(plot_df$Prom_config, levels = c("Open_Open","Open_Close","Close_Open","Close_Close"))
+
+# ggplot(data = plot_df, aes(x = Prom_config, y = prop_change)) +
+#   geom_bar(stat = "identity") +
+#   geom_text(aes(label = prop_change), vjust = -0.25) +
+#   scale_y_continuous(name = "% of gene in category", limits = c(0,100), breaks = seq(from = 0, to = 100, by = 10))
+
+ggplot(data = plot_df, aes(x = Prom_config, y = Change)) +
+  geom_bar(stat = "identity") +
+  ylim(0,5000) +
+  geom_text(aes(label = Change), vjust = -0.25) +
+  geom_text(data = subset(plot_df, Prom_config == "Open_Open"), aes(label = "***"), vjust = -1, size = 10) 
+
+```
+
+<div class="col2">
+```{r, Matrices pValue et odd ratio pour les config, eval = TRUE}
+
+pval = matrix(0,nrow = 4, ncol = 4)
+oddr = matrix(0,nrow = 4, ncol = 2)
+
+for (i in 1:4) {
+  
+  for (j in 1:2) {
+    hitInSample = final[i,j+1]
+    hitInPop = final[5,j+1]
+    failInPop = final[5,1]-final[5,j+1]
+    sampleSize = final[i,1]
+
+    a2 = fisher.test(matrix(c(hitInSample, hitInPop-hitInSample, sampleSize-hitInSample, failInPop-sampleSize +hitInSample), 2, 2), alternative='less')
+    pval[i,j] = a2$p.value
+    oddr[i,j] = as.numeric(a2$estimate)
+  }
+
+  for (j in 1:2) {
+    
+    hitInSample = final[i,j+1]
+    hitInPop = final[5,j+1]
+    failInPop = final[5,1]-final[5,j+1]
+    sampleSize = final[i,1]
+
+    a2 = fisher.test(matrix(c(hitInSample, hitInPop-hitInSample, sampleSize-hitInSample, failInPop-sampleSize +hitInSample), 2, 2), alternative='greater')
+    pval[i,j+2] = a2$p.value
+    
+  }
+}
+
+colnames(pval) = c("Under-representation_Gene_Change", "Under-representation_Gene_No_Change", "Gene Change", "Gene No_Change")
+rownames(pval) = c("Open_Open", "Open_Close", "Close_Open","Close_Close")
+colnames(oddr) = c("Change", "No Change")
+rownames(oddr) = c("Open_Open", "Open_Close", "Close_Open","Close_Close")
+
+
+
+pval[,3:4] %>% 
+  kable(caption = "Tableau des pValues (Over Representation)") %>% 
+  kable_styling(full_width = FALSE, position = "float_left")
+oddr%>% 
+  kable(caption = "Tableau des odd ratio") %>% 
+  kable_styling(full_width = FALSE, position = "right")
+
+
+```
+</div>
+
+\
+<div class = "grey">  
+**- Enregistrement des matrices de sortie**
+```{r, Enregistrement des matrices output, eval = TRUE}
+write.table(final, "output/24h_vs_48h/ATAC_GeneExpr_numbers_24_48.csv", row.names = T, col.names = NA, sep = "\t")
+write.table(pval, "output/24h_vs_48h/ATAC_GeneExpr_pval_24_48.csv", row.names = T, col.names = NA, sep = "\t")
+write.table(oddr, "output/24h_vs_48h/ATAC_GeneExpr_oddsratio_24_48.csv", row.names = T, col.names = NA, sep = "\t")
+```
+</div>
+
+
+
+<br><br><br> <!--Pour avoir un espace entre les grandes parties-->
+
+
+
+### .Scripts annexes (non vérifiés)  
+  
+Ravi a également produit des scripts :  \
+- Avec la catégorie Change décomposée en Up et Down  \
+- Ciblé sur les promoteurs et non pas les gènes  \
+
+Ces deux approches donnaient des résultats sensiblement équivalents à ceux obtenus avec le script au-dessus. Ils n'ont cependant pas été reproduits avec le nouveau jeu de donné.\
+
+<div class = "grey"> 
+Script : Promoter configuration vs expression (Up & down & NoChange - Ciblée gènes)
+```{r Promoter configuration vs expression (Up & down & NoChange - Ciblée gènes), eval=F}
+
+############################################
+### Promoter configuration vs expression ###  
+###   "Change" décomposé en up et down  ####
+############################################
+
+### Réalisation des matrices avec les nombres de cas (hit) pour chaque combinaison
+
+t = matrix(0, nrow = 5, ncol = 4)
+
+for (i in 1:length(peaks_condition)){
+  t[i,1] = length(unique(peaks_condition[[i]]$gene))
+  t[i,2] = length(unique(peaks_condition[[i]]$gene[which(peaks_condition[[i]]$Z_score>z_cutoff)]))
+  t[i,3] = length(unique(peaks_condition[[i]]$gene[which(peaks_condition[[i]]$Z_score<(-z_cutoff))]))
+  t[i,4] = length(unique(peaks_condition[[i]]$gene[which(peaks_condition[[i]]$Z_score>(-z_cutoff) & peaks_condition[[i]]$Z_score<z_cutoff)]))
+}
+
+t[5,] = c(length(Z_score),
+  length(which(Z_score>z_cutoff)),
+  length(which(Z_score<(-z_cutoff))), 
+  length(Z_score) - length(which(Z_score>z_cutoff)) - length(which(Z_score<(-z_cutoff)))
+  )
+
+colnames(t) = c("All", "Up", "Down", "No Change")
+rownames(t) = c("Open_Open", "Open_Close", "Close_Open", "Close_Close", "Total_Data")
+
+### Réalisation des matrices de pvalue et de odd ratio pour chaque combinaison
+
+pval = matrix(0,nrow = 4, ncol = 6)
+oddr = matrix(0,nrow = 4, ncol = 3)
+
+for (i in 1:4) {
+  
+  for (j in 1:3) {
+    hitInSample = t[i,j+1]
+    hitInPop = t[5,j+1]
+    failInPop = t[5,1]-t[5,j+1]
+    sampleSize = t[i,1]
+
+    a2 = fisher.test(matrix(c(hitInSample, hitInPop-hitInSample, sampleSize-hitInSample, failInPop-sampleSize +hitInSample), 2, 2), alternative='less')
+    pval[i,j] = a2$p.value
+    oddr[i,j] = as.numeric(a2$estimate)
+  }
+  
+  for (j in 1:3) {
+    hitInSample = t[i,j+1]
+    hitInPop = t[5,j+1]
+    failInPop = t[5,1]-t[5,j+1]
+    sampleSize = t[i,1]
+
+    a2 = fisher.test(matrix(c(hitInSample, hitInPop-hitInSample, sampleSize-hitInSample, failInPop-sampleSize +hitInSample), 2, 2), alternative='greater')
+    pval[i,j+3] = a2$p.value
+    
+  }
+}
+
+colnames(pval) = c("Up", "Down", "No Change","Up", "Down", "No Change")
+colnames(oddr) = c("Up", "Down", "No Change")
+rownames(pval) = c("Open_Open", "Open_Close", "Close_Open","Close_Close")
+rownames(oddr) = c("Open_Open", "Open_Close", "Close_Open","Close_Close")
+
+
+### Enregistrement des matrices ouput
+
+write.table(tp, "output/24h_vs_48h/ATAC_GeneExpr_up_down_noChange_numbers.csv", row.names = T, col.names = NA, sep = "\t")
+write.table(pval, "output/24h_vs_48h/ATAC_GeneExpr_up_down_noChange_pval.csv", row.names = T, col.names = NA, sep = "\t")
+write.table(oddr, "output/24h_vs_48h/ATAC_GeneExpr_up_down_noChange_oddsratio.csv", row.names = T, col.names = NA, sep = "\t")
+
+
+```
+Script : Promoter configuration vs expression (Change & NoChange - Ciblée promoteurs
+```{r Promoter configuration vs expression (Change & NoChange - Ciblée promoteurs), eval=F }
+
+tp = matrix(0, nrow = 5, ncol = 3)
+
+for (i in 1:length(peaks_condition)){
+  tp[i,1] = length(unique(peaks_condition[[i]]$promoter))
+  tp[i,2] = length(unique(peaks_condition[[i]]$promoter[-which(peaks_condition[[i]]$Z_score>(-z_cutoff) & peaks_condition[[i]]$Z_score<z_cutoff)]))
+  tp[i,3] = length(unique(peaks_condition[[i]]$promoter[which(peaks_condition[[i]]$Z_score>(-z_cutoff) & peaks_condition[[i]]$Z_score<z_cutoff)]))
+}
+tp[5,] = colSums(tp)
+colnames(tp) = c("All", "Change", "No_Change")
+rownames(tp) = c("Open_Open", "Open_Close", "Close_Open", "Close_Close", "Total_Data")
+
+pval = matrix(0,nrow = 4, ncol = 4)
+oddr = matrix(0,nrow = 4, ncol = 2)
+for (i in 1:4) {
+  for (j in 1:2) {
+    hitInSample = tp[i,j+1]
+    hitInPop = tp[5,j+1]
+    failInPop = tp[5,1]-tp[5,j+1]
+    sampleSize = tp[i,1]
+
+    a2 = fisher.test(matrix(c(hitInSample, hitInPop-hitInSample, sampleSize-hitInSample, failInPop-sampleSize +hitInSample), 2, 2), alternative='less')
+    pval[i,j] = a2$p.value
+    oddr[i,j] = as.numeric(a2$estimate)
+  }
+
+  for (j in 1:2) {
+    hitInSample = tp[i,j+1]
+    hitInPop = tp[5,j+1]
+    failInPop = tp[5,1]-tp[5,j+1]
+    sampleSize = tp[i,1]
+
+    a2 = fisher.test(matrix(c(hitInSample, hitInPop-hitInSample, sampleSize-hitInSample, failInPop-sampleSize +hitInSample), 2, 2), alternative='greater')
+    pval[i,j+2] = a2$p.value
+  }
+}
+colnames(pval) = c("Change", "No Change", "Change", "No Change")
+rownames(pval) = c("Open_Open", "Open_Close", "Close_Open","Close_Close")
+
+colnames(oddr) = c("Change", "No Change")
+rownames(oddr) = c("Open_Open", "Open_Close", "Close_Open","Close_Close")
+
+
+setwd("D:/Sincity/Final - Copy//Results/24_48/Promoters/")
+write.table(tp, "ATAC_GeneExpr_numbers.txt", row.names = T, col.names = NA, sep = "\t")
+write.table(pval,  "ATAC_GeneExpr_pval.txt", row.names = T, col.names = NA, sep = "\t")
+write.table(oddr,  "ATAC_GeneExpr_oddsratio.txt", row.names = T, col.names = NA, sep = "\t")
+```
+Script : Promoteur configuration vs expression (Up & down & NoChange - Ciblée promoteurs)
+```{r Promoteur configuration vs expression (Up & down & NoChange - Ciblée promoteurs), eval=F }
+
+t = matrix(0, nrow = 5, ncol = 4)
+
+for (i in 1:length(peaks_condition)){
+  t[i,1] = length(unique(peaks_condition[[i]]$promoter))
+  t[i,2] = length(unique(peaks_condition[[i]]$promoter[which(peaks_condition[[i]]$Z_score>z_cutoff)]))
+  t[i,3] = length(unique(peaks_condition[[i]]$promoter[which(peaks_condition[[i]]$Z_score<(-z_cutoff))]))
+  t[i,4] = length(unique(peaks_condition[[i]]$promoter[which(peaks_condition[[i]]$Z_score>(-z_cutoff) & peaks_condition[[i]]$Z_score<z_cutoff)]))
+}
+
+t[5,] = colSums(t)
+colnames(t) = c("All", "Up", "Down", "No Change")
+rownames(t) = c("Open_Open", "Open_Close", "Close_Open", "Close_Close", "Total_Data")
+
+pval = matrix(0,nrow = 4, ncol = 6)
+oddr = matrix(0,nrow = 4, ncol = 3)
+
+for (i in 1:4) {
+  for (j in 1:3) {
+    hitInSample = t[i,j+1]
+    hitInPop = t[5,j+1]
+    failInPop = t[5,1]-t[5,j+1]
+    sampleSize = t[i,1]
+
+    a2 = fisher.test(matrix(c(hitInSample, hitInPop-hitInSample, sampleSize-hitInSample, failInPop-sampleSize +hitInSample), 2, 2), alternative='less')
+    pval[i,j] = a2$p.value
+    oddr[i,j] = as.numeric(a2$estimate)
+  }
+  
+  for (j in 1:3) {
+    hitInSample = t[i,j+1]
+    hitInPop = t[5,j+1]
+    failInPop = t[5,1]-t[5,j+1]
+    sampleSize = t[i,1]
+
+    a2 = fisher.test(matrix(c(hitInSample, hitInPop-hitInSample, sampleSize-hitInSample, failInPop-sampleSize +hitInSample), 2, 2), alternative='greater')
+    pval[i,j+3] = a2$p.value
+  }
+}
+
+colnames(pval) = c("Up", "Down", "No Change","Up", "Down", "No Change")
+colnames(oddr) = c("Up", "Down", "No Change")
+rownames(pval) = c("Open_Open", "Open_Close", "Close_Open","Close_Close")
+rownames(oddr) = c("Open_Open", "Open_Close", "Close_Open","Close_Close")
+
+write.table(t, "ATAC_GeneExpr_All_numbers.txt", row.names = T, col.names = NA, sep = "\t")
+write.table(pval,  "ATAC_GeneExpr_All_pval.txt", row.names = T, col.names = NA, sep = "\t")
+write.table(oddr,  "ATAC_GeneExpr_All_oddsratio.txt", row.names = T, col.names = NA, sep = "\t")
+```
+</div>
+
+
+
+<br><br><br> <!--Pour avoir un espace entre les grandes parties-->
+
+
+
+## .Facteurs de transcription vs expression génique
+  
+### .Script de Ravi réorganisé avec nos données
+\
+Cette partie de l'analyse commence par charger le fichier "prom_gene_fantom.rda" :  \
+==> Il s'agit du fichier issu de la base de donnée **FANTOM5**. Il contient **123440 lignes qui correspondent toutes à un promoteur**. A chaque promoteur est associé un nom de transcrit (variant), le nom du gène, ainsi que les infos de start end du promoteur et son ID. \
+Ensuite le fichier "tf---promoter.prec90.txt" est chargé :  
+- Il liste des FTs ainsi que leurs cibles théoriques (Regulatory circuit, voir method). \
+- On applique un filtre pour garder seulement les cibles avec un **score de confiance >= 0.5** (contrairement à 0.5 à la base). \
+\
+<div class = "grey"> 
+**- Chargement des fichiers d'entrée**
+```{r, Chargement des inputs, eval = TRUE}
+# rm(list = ls())
+# Liste des promoteurs (avec leur info start-end, transcript_id et id) et leur association à un gène
+load("input_files/prom_gene_fantom.rda")
+
+# Tableau qui liste les TF connus(col 1) avec leurs multiples cibles (col 2) et y associe un score de confiance (col 3)
+tf_prom = read.table("input_files/tf---promoter.prec90.txt", header = T, sep = "\t", stringsAsFactors = F) #1169797
+
+# Load data MARSseq (issu de Spread_MARSseq_data_all_filters_20200728) arrangé pour fonctionner avec script Ravi
+load("intermediary_generated_files/Arranged_Spread_MARSseq_data_all_filters_20200728.rda")
+expr = wider_data_grouped
+rm(wider_data_grouped)
+
+# On load le vecteur de Zscore préalablement généré
+load("intermediary_generated_files/Zscore_all_genes_value_vector_24_48.rda")
+
+# z_cutoff = 2
+
+```
+</div>
+
+\
+**Filtre qualité sur le score de confiance**
+```{r, Filtre score sup egal 0.5, eval = TRUE}
+tf_prom_filtered = tf_prom[tf_prom$maxMotifConfidence >= 0.5,] # 248606 (312099 si on met >= 0.5)
+
+df_nbTF = data.frame(Unique_TF = c(length(unique(tf_prom$tf)),length(unique(tf_prom_filtered$tf))),
+                     Total_promotor = c(length(tf_prom$promoter),length(tf_prom_filtered$promoter)),
+                     Unique_promotor = c(length(unique(tf_prom$promoter)),length(unique(tf_prom_filtered$promoter))))
+
+rownames(df_nbTF) = c("Gene Reg TF", "TF>=0.5")
+
+df_nbTF %>%
+  kable() %>%
+  kable_styling(full_width = F)
+
+```
+
+\
+<div class = "grey"> 
+**- Création des listes de tf selon leur classement change/nochange**
+```{r, Création tf_change_list et enregistrement, eval = F}
+# On rajoute une colone Zscore (initialisée à 0)
+tf_prom_filtered$Z = 0
+
+## On associe à chaque TF un Zscore pour savoir si celui-ci a varié dans le temps
+
+for (i in 1:length(tf_prom_filtered$tf)) {
+  ind = which(expr$symbol==tf_prom_filtered$tf[i])
+  if (length(ind)>0) { tf_prom_filtered$Z[i] = Z_score[ind] }
+}
+
+# On créé une liste à deux élement : les TF avec un Zscore significatif et les TF avec un Zscore non significatif
+tf_change_list = list()
+tf_change_list[[1]] = tf_prom_filtered[-which(tf_prom_filtered$Z<z_cutoff & tf_prom_filtered$Z>(-z_cutoff)),] 
+tf_change_list[[2]] = tf_prom_filtered[which(tf_prom_filtered$Z<z_cutoff & tf_prom_filtered$Z>(-z_cutoff)),] 
+names(tf_change_list) = c("TF_genes_change","TF_genes_NoChange")
+
+save(tf_change_list, file = "intermediary_generated_files/list_tf_to_prom_and_Gene_expr_Zscore_24_48.rda")
+```
+</div>
+
+\
+**Affichage des résultats** \
+On observe le nombre de cibles de chaque TF, rangé par ordre croissant. Il va de 1 cible pour le TF "GLIS3" à 21703 cibles pour le TF "SP1".
+
+```{r, création des tableaux sur TF et affichage, eval = TRUE}
+load("intermediary_generated_files/list_tf_to_prom_and_Gene_expr_Zscore_24_48.rda")
+
+df_tf_change = tibble(TF = names(sort(table(tf_change_list[[1]]$tf))), Nb_target = sort(table(tf_change_list[[1]]$tf)))
+df_tf_nochange = tibble(TF = names(sort(table(tf_change_list[[2]]$tf))), Nb_target = sort(table(tf_change_list[[2]]$tf)))
+
+df_stat = tibble(TF_statut = c("Change", "No_Change"), 
+  mean_nb_prom_target = c(mean(table(tf_change_list[[1]]$tf)),mean(table(tf_change_list[[2]]$tf))),
+  SD_nb_prom_target = c(round(sd(table(tf_change_list[[1]]$tf)),0),round(sd(table(tf_change_list[[2]]$tf)),0)),
+  min_nb_prom_target = c(min(table(tf_change_list[[1]]$tf)),min(table(tf_change_list[[2]]$tf))),
+  max_nb_prom_target = c(max(table(tf_change_list[[1]]$tf)),max(table(tf_change_list[[2]]$tf))))
+
+# Affichage des tableaux
+
+df_tf_change %>% 
+  kable(caption = "TF CHANGE et leur nombre de promoteurs cibles") %>%
+  kable_styling(position = "left") %>%
+  scroll_box(height = "300px")
+
+df_tf_nochange  %>% 
+  kable(caption = "TF NO_CHANGE et leur nombre de promoteurs cibles") %>%
+  kable_styling(position = "float_right") %>%
+  scroll_box(height = "300px")
+
+```
+
+```{r, affichage tableaux df_global et df_stat, eval = TRUE}
+df_stat %>% 
+  kable(caption = "Nombre de promoteur ciblés par TF (statistiques)") %>%
+  kable_styling(full_width = F) %>%
+  scroll_box()
+```
+\
+=> Pour les TF_change, la moyenne est à **617 cibles par TF**, mais c'est très variable sd (781). \
+=> Pour les TF_noChange, la moyenne est à **665 cibles par TF**, mais c'est très variable sd (1488).  
+
+```{r, TF et nb cibles, eval = TRUE}
+### Etablir la correspondance entre Zscore (change et non change) pour les TF, les Zscore (change et noChange) pour les gènes associés
+### Correspondance faite par l'intermédiaire des promoteurs ciblés par les TF et ces même promoteurs qui controlent les gènes
+gene_list = list() # Gènes controlé
+
+# Nom des gènes récupérés en regardant quel prom ciblent les TF (prom_gene_fantom)
+# Puis  correspondance avec les prom associés aux gènes dans l'objet tf_change_list avec Zscore non significatif uniquement [[1]]
+
+gene_list[[1]] = data.frame(Gene = unique(prom_gene_fantom$gene[prom_gene_fantom$promoter %in% tf_change_list[[1]]$promoter]), stringsAsFactors = F)
+gene_list[[2]] = data.frame(Gene = setdiff(unique(prom_gene_fantom$gene[prom_gene_fantom$promoter %in%  tf_change_list[[2]]$promoter]),gene_list[[1]]$Gene), stringsAsFactors = F)
+
+df_global_TF = tibble(TF_statut = c("Change", "No_Change"), 
+  Nb_TF_gene = c(length(unique(tf_change_list[[1]]$tf)),length(unique(tf_change_list[[2]]$tf))),
+  Nb_prom_target = c(nrow(tf_change_list[[1]]),nrow(tf_change_list[[2]])),
+  Nb_unique_prom_target = c(length(unique(tf_change_list[[1]]$promoter)),length(unique(tf_change_list[[2]]$promoter))),
+  Nb_unique_gene_target = c(length(unique(gene_list[[1]]$Gene)),length(unique(gene_list[[2]]$Gene))))
+
+df_global_TF %>% 
+  kable(caption = "TF et leur nb de promoteurs cibles") %>%
+  kable_styling(full_width = F) %>%
+  scroll_box()
+```
+
+\
+Les TF étant eux-mêmes des gènes, on se charge de regarder comment est leur Zscore :  
+==> **16 d'entre eux ont un Zscore au dessus du cutoff à -2 et 2.** \
+==> Ces 16 TF ciblent un total de **8873 promoteurs différents**, qui correspondent à **3370 gènes uniques.** \
+  
+\
+*Rappel* :  
+Comme les gènes (change et no change) ne sont comptés qu'une seule fois - car à partir du moment où ils sont dans les 2 catégories (TF_change et TF_No_Change) alors ils sont comptés dans TF_Change - dans le cas, où ils sont plusieurs fois dans TF_change ou TF_No_Change alors ils ne sont comptés qu'une seule fois dans la catégorie.
+
+
+```{r, Gene non cibles, eval = TRUE}
+# On fait correspondre les Zscore au gènes controlé par un TF qui change
+# On rajoute le Zscore associé au gène en allant chercher la correspondance dans le tableau expr
+
+# Matrice de résutats (hits)
+
+gene_list[[1]]$Z_score = NA
+
+for (j in 1:length(gene_list[[1]]$Gene)) {
+  ind = which(expr$symbol==gene_list[[1]]$Gene[j])
+  if (length(ind)>0) { gene_list[[1]]$Z_score[j] = Z_score[ind] }
+}
+  
+gene_list[[2]]$Z_score = NA
+
+for (j in 1:length(gene_list[[2]]$Gene)) {
+    ind = which(expr$symbol==gene_list[[2]]$Gene[j])
+    if (length(ind)>0) {gene_list[[2]]$Z_score[j] = Z_score[ind] }
+}
+
+# Les NA proviennent du fait que parfois les TF ciblent des gènes (lien FANTOM et TF) qui n'ont pas été détectés en RNAseq
+cat("Attention, tous ces gènes n'ont pas été détectés en RNAseq. \n",
+    "Au total, il y a", sum(is.na(gene_list[[1]]$Z_score)),
+    "gènes pour lesquel un TF avec un Zscore Change est associé, mais il n'y a pas de transcrits détecté en RNAseq. \n",
+    "Au total, il y a", sum(is.na(gene_list[[2]]$Z_score)),
+    "gènes pour lesquel un TF avec un Zscore NoChange est associé, mais il n'y a pas de transcrits détecté en RNAseq.")
+
+gene_list[[1]] = gene_list[[1]][complete.cases(gene_list[[1]]),]
+gene_list[[2]] = gene_list[[2]][complete.cases(gene_list[[2]]),]
+
+save(gene_list, file = "intermediary_generated_files/list_target_genes_Change_NoChange_24_48.rda")
+
+```
+
+```{r, Gene vs TF, eval = TRUE}
+# On remplit la première ligne de la matrice de résultat (càd les gene change et non change sous controle d'un TF qui est Change)
+final = matrix(0, nrow = 2, ncol = 3) 
+z_cutoff = 2
+
+final[1,1] = length(unique(gene_list[[1]]$Gene))
+final[1,2] = length(unique(gene_list[[1]]$Gene[-which(gene_list[[1]]$Z_score<z_cutoff & gene_list[[1]]$Z_score>(-z_cutoff))]))
+final[1,3] = length(unique(gene_list[[1]]$Gene[which(gene_list[[1]]$Z_score<z_cutoff & gene_list[[1]]$Z_score>(-z_cutoff))]))
+
+final[2,1] = length(unique(gene_list[[2]]$Gene))
+final[2,2] = length(unique(gene_list[[2]]$Gene[-which(gene_list[[2]]$Z_score<z_cutoff & gene_list[[2]]$Z_score>(-z_cutoff))]))
+final[2,3] = length(unique(gene_list[[2]]$Gene[which(gene_list[[2]]$Z_score<z_cutoff & gene_list[[2]]$Z_score>(-z_cutoff))]))
+
+colnames(final) = c("all genes", "Target_Gene_Change", "Target_Gene_No_Change")
+rownames(final) = c("TF Change", "TF No Change")
+
+final %>% 
+  kable(caption = "Gènes change/no_change vs statut du TF qui les cible") %>%
+  kable_styling(full_width = F)
+```
+
+```{r, TF_statut vs Target gene statut, eval = TRUE}
+
+df = tibble(TF_statut = rownames(final), Target_Gene_change = final[,2], Target_Gene_No_change = final[,3])
+df = pivot_longer(df,cols = c(Target_Gene_change,Target_Gene_No_change),names_to = "Target_Gene_statut")
+
+sum_Gene_change = sum(df$value[which(df$Target_Gene_statut== "Target_Gene_change")])
+
+plot_df = df %>% 
+  filter(Target_Gene_statut == "Target_Gene_change") %>% 
+  mutate(prop_change = round((value/sum_Gene_change)*100,1))
+plot_df$TF_statut = as_factor(plot_df$TF_statut)
+
+# ggplot(data = plot_df, aes(x = TF_statut, y = prop_change)) +
+#   geom_bar(stat = "identity")+
+#   geom_text(aes(label = prop_change), vjust = -0.25) +
+#   geom_text(data = subset(plot_df, TF_statut == "TF Change"), aes(label = "***"), vjust = -1, size = 10) +
+#   scale_y_continuous(name = "% of gene in category", limits = c(0,100), breaks = seq(from = 0, to = 100, by = 10))
+
+ggplot(data = plot_df, aes(x = TF_statut, y = value)) +
+  geom_bar(stat = "identity")+
+  ylim(0,3000) +
+  geom_text(aes(label = value), vjust = -0.25) +
+  geom_text(data = subset(plot_df, TF_statut == "TF Change"), aes(label = "***"), vjust = -0.5, size = 10) 
+
+```
+
+```{r, Gene cible de la liste TF, eval = TRUE}
+total =  c(length(Z_score),length(which(Z_score<(-z_cutoff) | Z_score>z_cutoff)),length(-which(Z_score>(-z_cutoff) & Z_score<z_cutoff)))
+
+total_gene_sum_up = tibble(RNA_seq_data = c("Total detected", "Gene change", "Gene_no_Change"), 
+                           Gene_nb = total,
+                           Nb_TF_targeted_gene = c(sum(df$value),
+                                                   sum(df$value[which(df$Target_Gene_statut== "Target_Gene_change")]),
+                                                   sum(df$value[which(df$Target_Gene_statut== "Target_Gene_No_change")])))
+
+total_gene_sum_up = total_gene_sum_up %>% mutate(Gene_with_no_targetting_TF = Gene_nb - Nb_TF_targeted_gene)
+
+total_gene_sum_up %>% 
+  kable(caption = "Gènes ciblé et non ciblés par notre liste de TF") %>%
+  kable_styling(full_width = F) 
+```
+
+<div class="col2">
+```{r, Matrices pvalue et oddratio, eval = TRUE}
+
+pval = matrix(0,nrow = 2, ncol = 4)
+oddr = matrix(0,nrow = 2, ncol = 2)
+
+test1 = c(2,1)
+test2 = c(3,2)
+
+for (i in 1:2) {
+  
+  for (j in 1:2) {
+    a2 = fisher.test(matrix(c(final[i,j+1], final[test1[i],j+1], final[i,test2[j]], final[test1[i],test2[j]]), 2, 2), alternative='less')
+    pval[i,j] = a2$p.value
+    oddr[i,j] = as.numeric(a2$estimate)
+  }
+  
+  for (j in 1:2) {
+    a2 = fisher.test(matrix(c(final[i,j+1], final[test1[i],j+1], final[i,test2[j]], final[test1[i],test2[j]]), 2, 2), alternative='greater')
+    pval[i,j+2] = a2$p.value
+  }
+  
+}
+
+colnames(pval) = c("Under_representation_target_gene_Change", "Under_representation_target_gene_No Change",
+                   "Target Gene Change", "Target Gene No Change")
+rownames(pval) = c("TF Change", "TF No Change")
+colnames(oddr) = c("Change", "No Change")
+rownames(oddr) = c("TF Change", "TF No Change")
+
+pval[,3:4] %>% 
+  kable(caption = "Tableau des pValues (Over representation)") %>% 
+  kable_styling(full_width = FALSE, position = "float_left")
+
+oddr %>% 
+  kable(caption = "Tableau des odd ratio") %>% 
+  kable_styling(full_width = FALSE, position = "right")
+```
+</div>
+
+\
+<div class = "grey"> 
+**- Enregistrement des matrices de sortie**
+```{r, Enregistrement des matrices, eval = TRUE}
+write.table(final, "output/24h_vs_48h/TF_GeneExpr_numbers_24_48.csv", row.names = T, col.names = NA, sep = "\t")
+write.table(pval,  "output/24h_vs_48h/TF_GeneExpr_pval_24_48.csv", row.names = T, col.names = NA, sep = "\t")
+write.table(oddr,  "output/24h_vs_48h/TF_GeneExpr_oddsratio_24_48.csv", row.names = T, col.names = NA, sep = "\t")
+```
+</div>
+
+
+<br><br><br> <!--Pour avoir un espace entre les grandes parties-->
+
+
+
+### .Scripts annexes (non vérifiés) 
+  
+Ravi a produit un script similaire au précédent, mais il y a ajouté un TF-cutoff que je n'ai pas réussi à interpréter correctement. Par conséquent ce script n'a pas été plus développé que ça. \
+
+<div class = "grey"> 
+Script : Transcription factors vs gene expression (change & NoChange - Ciblée gènes - TF cutoff)
+```{r Transcription factors vs gene expression (change & NoChange - Ciblée gènes - TF cutoff),eval=F}
+
+# Indication du cutoff choisi dans le tableau 
+tf_cutoff = 50
+
+gene = data.frame(Gene = expr$symbol, Z = Z_score, stringsAsFactors = F)
+gene$N.TFs = 0
+gene$C.N.TFs = 0
+gene$NC.N.TFs = 0
+
+for (i in 1:length(gene$Gene)) {
+  test = prom_gene_fantom[prom_gene_fantom$gene==gene$Gene[i],]
+  test2 = tf_prom[tf_prom$promoter %in% test$promoter,]
+  
+  if (nrow(test2)>0) {
+    gene$N.TFs[i] = length(unique(test2$tf))
+    gene$C.N.TFs[i] = length(intersect(test2$tf, tf_change_list[[1]]$tf))
+    gene$NC.N.TFs[i] = length(intersect(test2$tf, tf_change_list[[2]]$tf))
+  }
+}
+
+gene$P = (gene$C.N.TFs/gene$N.TFs)*100
+
+nos = matrix(0, nrow = 2, ncol = 3)
+
+nos[1,1] = length(intersect(which(gene$N.TFs>0), which(gene$P>tf_cutoff)))
+nos[1,2] = length(intersect(intersect(which(gene$N.TFs>0), which(gene$P>tf_cutoff)),union(which(gene$Z>z_cutoff), which(gene$Z<(-z_cutoff)))))
+nos[1,3] = length(intersect(intersect(which(gene$N.TFs>0), which(gene$P>tf_cutoff)),intersect(which(gene$Z<z_cutoff), which(gene$Z>(-z_cutoff)))))
+nos[2,1] = length(intersect(which(gene$N.TFs>0), which(gene$P<=tf_cutoff)))
+nos[2,2] = length(intersect(intersect(which(gene$N.TFs>0), which(gene$P<=tf_cutoff)),union(which(gene$Z>z_cutoff), which(gene$Z<(-z_cutoff)))))
+nos[2,3] = length(intersect(intersect(which(gene$N.TFs>0), which(gene$P<=tf_cutoff)),intersect(which(gene$Z<z_cutoff), which(gene$Z>(-z_cutoff)))))
+
+pval = matrix(0,nrow = 2, ncol = 4)
+oddr = matrix(0,nrow = 2, ncol = 2)
+
+test1 = c(2,1)
+test2 = c(3,2)
+
+for (i in 1:2) {
+  for (j in 1:2) {
+    a2 = fisher.test(matrix(c(nos[i,j+1], nos[test1[i],j+1], nos[i,test2[j]], nos[test1[i],test2[j]]), 2, 2), alternative='less')
+    pval[i,j] = a2$p.value
+    oddr[i,j] = as.numeric(a2$estimate)
+  }
+
+  for (j in 1:2) {
+    a2 = fisher.test(matrix(c(nos[i,j+1], nos[test1[i],j+1], nos[i,test2[j]], nos[test1[i],test2[j]]), 2, 2), alternative='greater')
+    pval[i,j+2] = a2$p.value
+  }
+}
+
+
+colnames(pval) = c("Change", "No Change","Change", "No Change")
+rownames(pval) = c("TF Change", "TF No Change")
+
+colnames(oddr) = c("Change", "No Change")
+rownames(oddr) = c("TF Change", "TF No Change")
+
+write.table(nos, paste("TF_GeneExpr_numbers_",tf_cutoff,".txt", sep = "", collapse = ""), row.names = T, col.names = NA, sep = "\t")
+write.table(pval,  paste("TF_GeneExpr_pval_",tf_cutoff,".txt", sep = "", collapse = ""), row.names = T, col.names = NA, sep = "\t")
+write.table(oddr,  paste("TF_GeneExpr_oddsratio_",tf_cutoff,".txt", sep = "", collapse = ""), row.names = T, col.names = NA, sep = "\t")
+```
+</div>
+
+
+<br><br><br> <!--Pour avoir un espace entre les grandes parties-->
+
+
+
+## .Facteurs de transcription vs configuration promoteur vs expression génique  
+  
+### .Script de Ravi réorganisé avec nos données
+
+Cette partie débute en chargeant les objets générés dans les précédents scripts :  \
+  
+- **Zscore_all_genes_value_vector_24_48_final** => Vecteur (Z_score) de tous les Zscores moyens calculés en RNAseq  
+- **list_tf_to_prom_and_Gene_expr_Zscore_24_48** => liste à 2 éléments (TF_change_list) 
+    + L'un contient tous les tf dont le Zscore est significatif et l'ensemble des promoteurs qu'ils visent.  
+    + L'autre contient tous les tf dont le Zscore est non significatif et l'ensemble des promoteurs qu'ils visent. 
+- **list_prom_config_and_Gene_expr_Zscore_24_48_final** => liste à 4 éléments (peaks_condition) 
+   + Chaque élément est une configuration de promoteur, contenant les promoteurs, ainsi que toutes les informations des gènes associés.  
+
+<div class = "grey">
+**- Chargement des données d'entrée**
+```{r, eval = TRUE}
+#z_cutoff = 2
+### Load des list de prom et de TF associés au gènes et aux Zscore générés dans le précédents chunks
+load("intermediary_generated_files/Zscore_all_genes_value_vector_24_48.rda")
+load("intermediary_generated_files/list_tf_to_prom_and_Gene_expr_Zscore_24_48.rda")
+load("intermediary_generated_files/list_prom_config_and_Gene_expr_Zscore_24_48.rda")
+```
+</div>
+
+```{r, Remplisage de la matrice final gene TF et promoteur, eval = TRUE}
+peaks_condition_tf_change = list()
+final = matrix(0,nrow = 8, ncol = 4)
+
+for (j in 1:length(peaks_condition)) {
+  
+  # Récupère uniquement les peaks dont les promoteurs ont été détectés comme associés avec des TF qui sont DE (TF_change_list[[1]] = TF change)
+  peaks_condition_tf_change[[j]] = peaks_condition[[j]][peaks_condition[[j]]$promoter %in% tf_change_list[[1]]$promoter,]
+  # Rajoute le nom du TF associé au promoteur
+  peaks_condition_tf_change[[j]]$TF = tf_change_list[[1]]$tf[match(peaks_condition_tf_change[[j]]$promoter,tf_change_list[[1]]$promoter)]
+  
+  # Récupère le nb de gènes différents qui apparaissent dans open open (qaund j = 1) ==> 11982
+  final[j,1] = length(unique(peaks_condition[[j]]$gene))
+  # Nb de gènes dont le prom est open-open avec un Zscore significatif pour le TF associé
+  final[j,2] = length(unique(peaks_condition_tf_change[[j]]$gene))
+  # Nb de gènes DE (parce que union des conditions qui dépassent le Zcutoff) qui ont un TF change (parce que TF_change_list[[1]] = TF change)
+  final[j,3] = length(unique(peaks_condition_tf_change[[j]]$gene[union(which(peaks_condition_tf_change[[j]]$Z_score > z_cutoff), 
+                                                                       which(peaks_condition_tf_change[[j]]$Z_score < (-z_cutoff)))]))
+  # Nb de gènes DE (parce que union des conditions qui dépassent le Zcutoff) qui ont un TF change (parce que TF_change_list[[1]] = TF change)
+  final[j,4] = length(unique(peaks_condition_tf_change[[j]]$gene[which(peaks_condition_tf_change[[j]]$Z_score<z_cutoff & peaks_condition_tf_change[[j]]$Z_score>(-z_cutoff))]))
+  
+   }
+
+peaks_condition_tf_change2 = list()
+
+for (j in 1:length(peaks_condition)) {
+  
+  # Récupère uniquement les peaks dont les prmoteurs ont  été détectés comme associés avec des TF qui sont pas DE (TF_change_list[[2]] = TF no_change)
+  peaks_condition_tf_change2[[j]] = peaks_condition[[j]][peaks_condition[[j]]$promoter %in% tf_change_list[[2]]$promoter,]
+  # Rajoute le nom du TF associé au promoteur
+  peaks_condition_tf_change2[[j]]$TF = tf_change_list[[2]]$tf[match(peaks_condition_tf_change2[[j]]$promoter,tf_change_list[[2]]$promoter)]
+
+  # Récupère le nb de gènes différents qui apparaissent dans open open (qaund j = 1) ==> 11982
+  final[4+j,1] = length(unique(peaks_condition[[j]]$gene))
+  # Récupère le nb total de gènes avec un TF no Change qui n'apparaissent pas déjà dans le tableau change
+  # Les gènes déjà comptés avec le tableau TF_change ne le sont plus s'ils apparaisent dans le tableau TF_no_change
+  # Ils ne sont comptés que si uniquement dans le tableau TF_no change
+  final[4+j,2] = length(setdiff(peaks_condition_tf_change2[[j]]$gene,
+                                peaks_condition_tf_change[[j]]$gene))
+  # Nb de gène DE mais dont le TF n'est pas DE et qui n'apparaît pas déjà dans la première boucle avec les TF DE
+  final[4+j,3] = length(setdiff(
+    peaks_condition_tf_change2[[j]]$gene[union(which(peaks_condition_tf_change2[[j]]$Z_score>z_cutoff), which(peaks_condition_tf_change2[[j]]$Z_score<(-z_cutoff)))],   
+    peaks_condition_tf_change[[j]]$gene[union(which(peaks_condition_tf_change[[j]]$Z_score>z_cutoff), which(peaks_condition_tf_change[[j]]$Z_score<(-z_cutoff)))]))
+  # Nb de gène non-DE mais dont le TF n'est pas DE et qui n'apparaît pas déjà dans la première boucle avec les TF DE
+  final[4+j,4] = length(setdiff(
+    peaks_condition_tf_change2[[j]]$gene[which(peaks_condition_tf_change2[[j]]$Z_score<z_cutoff & peaks_condition_tf_change2[[j]]$Z_score>(-z_cutoff))],
+    peaks_condition_tf_change[[j]]$gene[which(peaks_condition_tf_change[[j]]$Z_score<z_cutoff & peaks_condition_tf_change[[j]]$Z_score>(-z_cutoff))]))
+  
+}
+
+colnames(final) = c("All_genes_in_condition","All_genes_in_TF_change", "Gene Change", "Gene No Change")
+rownames(final) = c("TF_change-Open_Open", "TF_change-Open_Close", "TF_change-Close_Open", "TF_change-Close_Close",
+                    "TF_no_change-Open_Open", "TF_no_change-Open_Close", "TF_no_change-Close_Open", "TF_no_change-Close_Close")
+
+# Exemple de pourquoi on fait le setDiff:
+  
+# ABCD1 TF1  TF_change      Zscore_Gene_DE
+# ABCD1 TF2  TF_no_change   Zscore_Gene_DE ==> Ne doit pas être compté Nb de gène DE mais dont le TF n'est pas DE car le même gene apparaît dajà ds le TF_change
+
+# ABCD2 TF1  TF_change      Zscore_Gene_no_DE
+# ABCD2 TF2  TF_no_change   Zscore_Gene_no_DE ==> Ne doit pas être compté Nb de gène non-DE mais dont le TF n'est pas DE car le même gene apparaît dajà ds le TF_change
+
+
+### Print le nombre de gène ciblés par un TF (change ou pas change) dans chaque catégorie de promoteur
+
+df_nb_prom_targeted_by_TF = tibble(Prom_config = c("Open-Open", "Open-Close", "Close-Open", "Close_Close"),
+                                   Nb_prom = final[1:4,1],
+                                   Nb_change_TF_targeted_genes_found = final[1:4,2],
+                                   Nb_No_change_TF_targeted_genes_found = final[5:8,2]) %>%
+                            mutate(nb_gene_without_targetting_TF_found = Nb_prom-(Nb_change_TF_targeted_genes_found+Nb_No_change_TF_targeted_genes_found ))
+
+
+df_nb_prom_targeted_by_TF %>% 
+  kable(caption = "Gènes ciblés par un TF (change/no_change) vs correspondance avec les promoteurs (par config)") %>%
+  kable_styling()%>%
+  scroll_box(width = "100%")
+```
+
+\
+La première chose qu'il faut noter est que lorsque l'on fait la correspondance catégorie par catégorie des configurations de promoteurs avec les TF qui les ciblent, on note que la somme des gènes présents dans les catégories de configuration de promoteurs est plus élevée que la somme des gènes ciblés par les TF qui sont associés à ces derniers. \
+==> Cela veut dire qu'**une partie des promoteurs de FANTOM n'est pas retrouvée dans la liste des promoteurs ciblés par des TF** (avec le score de confiance choisi). \
+==> On note que leur nombre représente parfois une part non négligeable (voir tableau). \
+\
+Rappellons également qu'un gène peut apparaître dans plusieurs catégories de configuration promoteur (s'il est sous contrôle de promoteurs différents avec des dynamiques différentes). Cela a pour conséquence que **ENTRE LES CATEGORIES certains gènes peuvent parfois être comptés à la fois dans TF_change et dans TF_no_Change**. En effet, si un gène qui change à un promoteur open-open avec un TF qui change alors il sera comptabilisé dans la catégorie "open-open/TF_change/Gene_change. Mais si ce dernier a également un promoteur dans open_close qui lui est visé par un TF qui No_Change, alors ce même gène sera comptabilisé dans la catégorie "open-close/TF_no_change/Gene_change. Si cet autre TF change lui aussi alors le même gène sera comptabilisé 2 fois dans la catégorie TF_change. C'est pour cela que la somme des TF_change (8720) dépasse celle indiquée dans le tableau où ne prend que en compte les TF change vs Expression (6356).
+
+```{r, Gene ChangeNochange vs categorie vs TF ChangeNochange, eval = TRUE}
+
+df_nb_gene_all = tibble(TF_statut = c(rep("TF_change",4),rep(rep("TF_no_change",4))),
+                        Prom_config = rep(c("Open-Open", "Open-Close", "Close-Open", "Close_Close"),2),
+                        Nb_targeted_genes_change = final[,3],
+                        Nb_targeted_genes_No_change = final[,4])
+
+df_nb_gene_all %>% 
+  kable(caption = "Gènes change/no_change vs leur(s) TF (change/no_change) vs prom config") %>%
+  kable_styling()
+
+```
+
+```{r, Plot pourcentage de genes par categorie, eval = TRUE}
+
+sum_gene_change = sum(df_nb_gene_all$Nb_targeted_genes_change)
+
+df_plot = df_nb_gene_all %>% mutate(prop_change = round((Nb_targeted_genes_change/sum_gene_change)*100,1))
+df_plot$TF_statut = as_factor(df_plot$TF_statut)
+df_plot$Prom_config = as_factor(df_plot$Prom_config)
+
+# ggplot(data = df_plot, aes(x = Prom_config, y = prop_change, fill = TF_statut)) +
+#   geom_bar(stat = "identity", position ="dodge") +
+#   geom_text(aes(label = prop_change), position=position_dodge(width=0.9), vjust=-0.25) +
+#   scale_y_continuous(name = "% of gene in category", limits = c(0,100), breaks = seq(from = 0, to = 100, by = 10))
+
+ggplot(data = df_plot, aes(x = Prom_config, y = Nb_targeted_genes_change, fill = TF_statut)) +
+  geom_bar(stat = "identity", position ="dodge") +
+  ylim(0,3000) +
+  geom_text(aes(label = Nb_targeted_genes_change), position=position_dodge(width=0.9), vjust=-0.25) +
+  geom_text(data = subset(df_plot, TF_statut == "TF_change" & Prom_config == "Open-Open"), 
+            aes(label = "***"), 
+            vjust = -0.5, hjust = 1.1, size = 10)
+
+```
+
+```{r, Matrices pvalue et oddratio avec TF, eval = TRUE }
+pval = matrix(0, nrow =8, ncol = 4)
+oddr = matrix(0, nrow= 8, ncol = 2)
+test1 = c(5,6,7,8,1,2,3,4)
+test2 = c(4,3)
+
+for (i in 1:8) {
+  for (j in 1:2) {
+
+    hitInSample = final[i,j+2]
+    hitInPop = final[test1[i],j+2]+final[i,j+2]
+    failInPop = final[i,test2[j]]+final[test1[i],test2[j]]
+    sampleSize = final[i,3]+final[i,4]
+
+    a2 = fisher.test(matrix(c(hitInSample, hitInPop-hitInSample, sampleSize-hitInSample, failInPop-sampleSize +hitInSample), 2, 2), alternative='less')
+    pval[i,j] = a2$p.value
+    oddr[i,j] = as.numeric(a2$estimate)
+  }
+  for (j in 1:2) {
+
+    hitInSample = final[i,j+2]
+    hitInPop = final[test1[i],j+2]+final[i,j+2]
+    failInPop = final[i,test2[j]]+final[test1[i],test2[j]]
+    sampleSize = final[i,3]+final[i,4]
+
+    a2 = fisher.test(matrix(c(hitInSample, hitInPop-hitInSample, sampleSize-hitInSample, failInPop-sampleSize +hitInSample), 2, 2), alternative='greater')
+    pval[i,j+2] = a2$p.value
+  }
+}
+
+colnames(pval) = c("under_reprez_target_gene_change",
+  "under_reprez_target_gene_No_change",
+  "Target Gene change",
+  "Target Gene No change")
+rownames(pval) = c("TF_change-Open_Open", "TF_change-Open_Close", "TF_change-Close_Open", "TF_change-Close_Close",
+                    "TF_no_change-Open_Open", "TF_no_change-Open_Close", "TF_no_change-Close_Open", "TF_no_change-Close_Close")
+
+colnames(oddr) = c("Change", "No Change")
+rownames(oddr) = c("TF_change-Open_Open", "TF_change-Open_Close", "TF_change-Close_Open", "TF_change-Close_Close",
+                    "TF_no_change-Open_Open", "TF_no_change-Open_Close", "TF_no_change-Close_Open", "TF_no_change-Close_Close")
+
+pval[,3:4] %>% 
+  kable(caption = "Tableau des pValues (Over Representation)") %>% 
+  kable_styling(full_width = F)
+
+oddr %>% 
+  kable(caption = "Tableau des odd ratios") %>% 
+  kable_styling(full_width = F)
+
+```
+
+\
+<div class = "grey">
+**- Enregistrement des fichiers de sortie**
+```{r, eval = TRUE}
+save(peaks_condition_tf_change,file = "intermediary_generated_files/list_TF_change_ATAC_config_Gene_Expr_Zscore_24_48.rda")
+save(peaks_condition_tf_change2,file = "intermediary_generated_files/list_TF_Nochange_ATAC_config_Gene_Expr_Zscore_24_48.rda")
+write.table(final, "output/24h_vs_48h/TF_ATAC_GeneExpr_numbers_24_48.csv", row.names = T, col.names = NA, sep = "\t")
+write.table(pval,  "output/24h_vs_48h/TF_ATAC_GeneExpr_pval_24_48.csv", row.names = T, col.names = NA, sep = "\t")
+write.table(oddr,  "output/24h_vs_48h/TF_ATAC_GeneExpr_oddsratio_24_48.csv", row.names = T, col.names = NA, sep = "\t")
+```
+</div>
+
+<br><br><br> <!--Pour avoir un espace entre les grandes parties-->
+
+
+
+### .Script annexes (non vérifiés)
+
+<div class = "grey">
+Script : Transcription factors vs promoter configuration vs expression (change & Nochange - ciblée promoteurs)
+```{r Transcription factors vs promoter configuration vs expression (change & Nochange - ciblée promoteurs), eval=F }
+
+final = matrix(0,nrow = 8, ncol = 4)
+for (j in 1:length(peaks_condition)) {
+  final[j,1] = length(unique(peaks_condition[[j]]$promoter))
+  final[j,2] = length(unique(peaks_condition_tf_change[[j]]$promoter))
+  final[j,3] = length(unique(peaks_condition_tf_change[[j]]$promoter[union(which(peaks_condition_tf_change[[j]]$Z_score>z_cutoff), which(peaks_condition_tf_change[[j]]$Z_score<(-z_cutoff)))]))
+  final[j,4] = length(unique(peaks_condition_tf_change[[j]]$promoter[which(peaks_condition_tf_change[[j]]$Z_score<z_cutoff & peaks_condition_tf_change[[j]]$Z_score>(-z_cutoff))]))
+}
+
+for (j in 1:length(peaks_condition)) {
+  final[4+j,1] = length(unique(peaks_condition[[j]]$promoter))
+  final[4+j,2] = length(setdiff(peaks_condition_tf_change2[[j]]$promoter,peaks_condition_tf_change[[j]]$promoter))
+  final[4+j,3] = length(setdiff(peaks_condition_tf_change2[[j]]$promoter[union(which(peaks_condition_tf_change2[[j]]$Z_score>z_cutoff), which(peaks_condition_tf_change2[[j]]$Z_score<(-z_cutoff)))], peaks_condition_tf_change[[j]]$promoter[union(which(peaks_condition_tf_change[[j]]$Z_score>z_cutoff), which(peaks_condition_tf_change[[j]]$Z_score<(-z_cutoff)))]))
+  final[4+j,4] = length(setdiff(peaks_condition_tf_change2[[j]]$promoter[which(peaks_condition_tf_change2[[j]]$Z_score<z_cutoff & peaks_condition_tf_change2[[j]]$Z_score>(-z_cutoff))],peaks_condition_tf_change[[j]]$promoter[which(peaks_condition_tf_change[[j]]$Z_score<z_cutoff & peaks_condition_tf_change[[j]]$Z_score>(-z_cutoff))] ))
+}
+colnames(final) = c("All_promoters_in_condition","All_promoters_in_TF_change", "TF Change", "TF No Change")
+rownames(final) = c("Open_Open", "Open_Close", "Close_Open", "Close_Close","Open_Open", "Open_Close", "Close_Open", "Close_Close")
+
+
+pval = matrix(0, nrow =8, ncol = 4)
+oddr = matrix(0, nrow= 8, ncol = 2)
+test1 = c(5,6,7,8,1,2,3,4)
+test2 = c(4,3)
+for (i in 1:8) {
+  for (j in 1:2) {
+
+    hitInSample = final[i,j+2]
+    hitInPop = final[test1[i],j+2]+final[i,j+2]
+    failInPop = final[i,test2[j]]+final[test1[i],test2[j]]
+    sampleSize = final[i,3]+final[i,4]
+
+    a2 = fisher.test(matrix(c(hitInSample, hitInPop-hitInSample, sampleSize-hitInSample, failInPop-sampleSize +hitInSample), 2, 2), alternative='less')
+    pval[i,j] = a2$p.value
+    oddr[i,j] = as.numeric(a2$estimate)
+  }
+  for (j in 1:2) {
+
+    hitInSample = final[i,j+2]
+    hitInPop = final[test1[i],j+2]+final[i,j+2]
+    failInPop = final[i,test2[j]]+final[test1[i],test2[j]]
+    sampleSize = final[i,3]+final[i,4]
+
+    a2 = fisher.test(matrix(c(hitInSample, hitInPop-hitInSample, sampleSize-hitInSample, failInPop-sampleSize +hitInSample), 2, 2), alternative='greater')
+    pval[i,j+2] = a2$p.value
+  }
+}
+setwd("D:/Sincity/Final - Copy//Results/24_48/Promoters/")
+write.table(final, "TF_ATAC_GeneExpr_numbers.txt", row.names = T, col.names = NA, sep = "\t")
+write.table(pval,  "TF_ATAC_GeneExpr_pval.txt", row.names = T, col.names = NA, sep = "\t")
+write.table(oddr,  "TF_ATAC_GeneExpr_oddsratio.txt", row.names = T, col.names = NA, sep = "\t")
+```
+Script : Transcription factors vs promoter configuration vs expression (change & Nochange - ciblée promoteurs - TF cutoff)
+```{r Transcription factors vs promoter configuration vs expression (change & Nochange - ciblée promoteurs - TF cutoff), eval=F}
+
+final_new = matrix(0,nrow = 8, ncol = 3)
+
+for (z in 1:length(peaks_condition_tf_change)) {
+  
+  test = rbind(peaks_condition_tf_change[[z]], peaks_condition_tf_change2[[z]])
+  test2 = data.frame(Gene = unique(test$gene), stringsAsFactors = F)
+  test2$N.TFs = 0
+  test2$C.N.TFs = 0
+  test2$NC.N.TFs = 0
+  
+  for (i in 1:length(test2$Gene)) {
+    
+    test3 = test[test$gene==test2$Gene[[i]],]
+    test2$N.TFs[i] = length(unique(test3$TF))
+    test2$C.N.TFs[i] = length(intersect(test3$TF, tf_change_list[[1]]$tf))
+    test2$NC.N.TFs[i] = length(intersect(test3$TF, tf_change_list[[2]]$tf))
+
+  }
+  
+  test2$P = (test2$C.N.TFs/test2$N.TFs)*100
+  test2$Z = test$Z_score[match(test2$Gene, test$gene)]
+  final_new[z,1] = length(test2$Gene[test2$P>tf_cutoff])
+  final_new[z,2] = length(test2$Gene[intersect(which(test2$P>tf_cutoff),union(which(test2$Z>z_cutoff), which(test2$Z<(-z_cutoff))))])
+  final_new[z,3] = length(test2$Gene[intersect(which(test2$P>tf_cutoff),intersect(which(test2$Z<z_cutoff), which(test2$Z>(-z_cutoff))))])
+  final_new[z+4,1] = length(test2$Gene[test2$P<=tf_cutoff])
+  final_new[z+4,2] = length(test2$Gene[intersect(which(test2$P<=tf_cutoff),union(which(test2$Z>z_cutoff), which(test2$Z<(-z_cutoff))))])
+  final_new[z+4,3] = length(test2$Gene[intersect(which(test2$P<=tf_cutoff),intersect(which(test2$Z<z_cutoff), which(test2$Z>(-z_cutoff))))])
+  
+}
+
+colnames(final_new) = c("All_genes_in_TF_change", "TF Change", "TF No Change")
+rownames(final_new) = c("Open_Open", "Open_Close", "Close_Open", "Close_Close","Open_Open", "Open_Close", "Close_Open", "Close_Close")
+
+
+pval = matrix(0, nrow =8, ncol = 4)
+oddr = matrix(0, nrow= 8, ncol = 2)
+test1 = c(5,6,7,8,1,2,3,4)
+test2 = c(3,2)
+
+for (i in 1:8) {
+  for (j in 1:2) {
+
+    hitInSample = final_new[i,j+1]
+    hitInPop = final_new[test1[i],j+1]+final_new[i,j+1]
+    failInPop = final_new[i,test2[j]]+final_new[test1[i],test2[j]]
+    sampleSize = final_new[i,2]+final_new[i,3]
+
+    a2 = fisher.test(matrix(c(hitInSample, hitInPop-hitInSample, sampleSize-hitInSample, failInPop-sampleSize +hitInSample), 2, 2), alternative='less')
+    pval[i,j] = a2$p.value
+    oddr[i,j] = as.numeric(a2$estimate)
+  }
+  for (j in 1:2) {
+
+    hitInSample = final_new[i,j+1]
+    hitInPop = final_new[test1[i],j+1]+final_new[i,j+1]
+    failInPop = final_new[i,test2[j]]+final_new[test1[i],test2[j]]
+    sampleSize = final_new[i,2]+final_new[i,3]
+
+    a2 = fisher.test(matrix(c(hitInSample, hitInPop-hitInSample, sampleSize-hitInSample, failInPop-sampleSize +hitInSample), 2, 2), alternative='greater')
+    pval[i,j+2] = a2$p.value
+  }
+}
+
+write.table(final_new, paste("TF_ATAC_GeneExpr_numbers_",tf_cutoff,".txt", sep = "", collapse = ""), row.names = T, col.names = NA, sep = "\t")
+write.table(pval,  paste("TF_ATAC_GeneExpr_pval_",tf_cutoff,".txt", sep = "", collapse = ""), row.names = T, col.names = NA, sep = "\t")
+write.table(oddr,  paste("TF_ATAC_GeneExpr_oddsratio_",tf_cutoff,".txt", sep = "", collapse = ""), row.names = T, col.names = NA, sep = "\t")
+```
+</div>

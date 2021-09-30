@@ -1,0 +1,253 @@
+---
+title: "Lab_Report_ATAC_investigations_paper"
+author: "Romuald Parmentier"
+date: '28 Mars 2020'
+output:
+  html_document:
+    df_print: paged
+    code_folding: hide
+    toc: yes
+  html_notebook:
+    code_folding: hide
+    toc: yes
+    toc_float: no
+  pdf_document:
+    toc: yes
+editor_options:
+  chunk_output_type: inline
+---
+
+```{r environement setup, warning=FALSE, include=FALSE}
+
+library(knitr)
+library(tidyverse)
+library(reshape)
+library(GenomicRanges)
+library(grid)
+library(gtools)
+library(ggthemes)
+library(rvg)
+library(officer)
+library(ggrepel)
+
+```
+
+```{r functions definition, include=FALSE}
+
+#Loads an RData file, and assign it a new name
+loadRData <- function(fileName){ 
+    load(fileName)
+    get(ls()[ls() != "fileName"])
+}
+
+create_pptx <- function(plot, path){
+  
+    if(!file.exists(path)) {
+        out <- read_pptx()
+    } else {
+        out <- read_pptx(path)
+    }
+    
+    out %>%
+        add_slide(layout = "Title and Content", master = "Office Theme") %>%
+        ph_with(dml(ggobj = plot), location = ph_location_fullsize()) %>% 
+        print(target = path)
+}
+
+```
+
+Attention, les autres points de temps ne sont pas fait car il y a eu une erreur de sauvegarde du script. Il suffit de copier coller ce chunk en changeant les input files (dans le même dossier) et en changeant le nom des graphs et des outputs
+
+```{r Volacno plots (5h_vs_24h) DE-TF, warning=FALSE}
+
+d2res <- read.delim("/home/romuald/Bureau/Analyses_MARS-ATAC/New_volcano/Input_files/DESeq2_final_results_24h_vs_0h_3v3_intersect_PE_comba_2019_06_13_12h54mn21.txt")
+
+colnames(d2res)[1] = "peak_name"
+### Rajout de la catégorie de chaque peak pour un highlight selectif sur le volcanoplot
+  
+  inc_024 = loadRData("/home/romuald/Bureau/Analyses_MARS-ATAC/New_volcano/Input_files/peaks_inc_24h_vs_00h_ann_gr.rda")
+  dec_024 = loadRData("/home/romuald/Bureau/Analyses_MARS-ATAC/New_volcano/Input_files/peaks_dec_24h_vs_00h_ann_gr.rda") 
+  noc_024 = loadRData("/home/romuald/Bureau/Analyses_MARS-ATAC/New_volcano/Input_files/peaks_noc_24h_vs_00h_ann_gr.rda")
+  
+  all_deseq_peaks = c(inc_024,dec_024,noc_024)
+  
+
+### Rajout du nom des gènes pour lesquels on veut avoir un label sur le volcanoplot
+load("~/Bureau/Analyses_MARS-ATAC/TF_vs_Prom_vs_Expr_redo/intermediary_generated_files/list_target_genes_Change_NoChange_05_24.rda")
+list_gene = unique(gene_list[[1]]$Gene)
+
+# On charge la base de données de promoter que Ravi nous a fourni
+
+load("~/Bureau/Analyses_MARS-ATAC/TF_vs_Prom_vs_Expr_redo/input_files/prom_gene_fantom.rda")
+
+prom_gene_fantom_gr = GRanges(
+  seqnames= prom_gene_fantom$seqnames, 
+  ranges = IRanges(start = prom_gene_fantom$start, end = prom_gene_fantom$end),mcols = prom_gene_fantom$gene)
+
+# On récupère les info des promoteurs de la liste de gène qui nous intresse
+prom_gene_fantom_gr = prom_gene_fantom_gr[prom_gene_fantom_gr$mcols %in% list_gene]
+
+# On créé un Grange de tous les peaks du volcano
+volcano_genes_gr = GRanges(seqnames = d2res$Chr,
+  ranges = IRanges(start = d2res$Start, end = d2res$End))
+
+### Ne récupère que les peaks ATAC (de la gene_list définie auparavant) qui overlap avec des promoteur de la base FANTOM
+peaks_target_of_DE_TF_TSS = findOverlaps(volcano_genes_gr,prom_gene_fantom_gr)
+
+# Indices des peaks de la liste des peaks ATACseq (volnaco_plot_gr) qui overlappent avec les promoteurs des gènes de la liste qui nous intéresse
+overlap_peaks_nb = queryHits(peaks_target_of_DE_TF_TSS) 
+
+# Indices des promoteurs de la liste des promoteurs (prom_gene_fantom_gr) qui overlappent avec les peaks ATAC (volcano plot)
+overlap_prom_nb = subjectHits(peaks_target_of_DE_TF_TSS)
+
+cor_peak_prom_gene = tibble("peak_name" = d2res[overlap_peaks_nb,]$peak_name, "gene_name" = prom_gene_fantom_gr$mcols[overlap_prom_nb])
+cor_peak_prom_gene = distinct(cor_peak_prom_gene)
+
+d2res = inner_join(d2res, cor_peak_prom_gene, by = "peak_name")
+
+### Paramètrage pour le volcanoplot 
+
+plotDF<- d2res[,c(1,6,9,11)]
+
+plotDF = plotDF %>%
+  mutate(new_reg = case_when(
+    pvalue <= 0.01 & log2FoldChange > 0 ~ "Open region",
+    pvalue <= 0.01 & log2FoldChange < 0 ~ "Closed region",
+    TRUE ~ "No change")
+  )
+
+plotDF$new_reg = as.factor(plotDF$new_reg)
+
+# Paramètreage du volcano plot
+
+### Stock les définition des états de peak (ouvert/fermé/bouge pas) dans des variables
+
+downColor <- "red"
+noChangeColor <- "black"
+upColor <- "green4"
+selected_color <- "black"
+
+subtitle = paste("Closed region =", table(plotDF$new_reg)[1],"\n No change region = ", table(plotDF$new_reg)[2], "\n Open region =", table(plotDF$new_reg)[3])
+
+xlimit = 10
+
+p <- ggplot(plotDF, aes(x = log2FoldChange, y = -1 * log10(pvalue), col=new_reg)) +
+  geom_point(size=2, alpha = 0.3) +
+  scale_color_manual(name = "Regulation", values = c(downColor,noChangeColor,upColor)) +
+  scale_shape_manual(name = "Regulation" , values = c(20,20,20)) + 
+  scale_x_continuous(limits = c(-xlimit, xlimit)) + 
+  ylim(NA,10) +
+  labs(title = "Differential accessibility of TF-targeted promoter \n DE-TF-Targets \n 5H vs 24h",
+    subtitle = subtitle,
+    x = "log2(FoldChange)", y = "-log10(Pvalue)") +
+  theme_tufte()+
+  theme(axis.line.y = element_line(color = "black"),
+    axis.line.x = element_line(color = "black"),
+    legend.text = element_text(size = 10),
+    legend.title = element_text(size = 11),
+    axis.title = element_text(size = 10),
+    plot.subtitle = element_text(size = 11,hjust = 0.5)) 
+
+p
+
+ggsave(p,width = 10,height = 9, filename = "~/Bureau/Analyses_MARS-ATAC/New_volcano/TF-target_accessibility_plot/volcano_DE-TF_0-24.png")
+
+```
+
+```{r Volacno plots (5h_vs_24h) noDE-TF, warning=FALSE}
+
+d2res <- read.delim("/home/romuald/Bureau/Analyses_MARS-ATAC/New_volcano/Input_files/DESeq2_final_results_24h_vs_0h_3v3_intersect_PE_comba_2019_06_13_12h54mn21.txt")
+
+colnames(d2res)[1] = "peak_name"
+### Rajout de la catégorie de chaque peak pour un highlight selectif sur le volcanoplot
+  
+  inc_024 = loadRData("/home/romuald/Bureau/Analyses_MARS-ATAC/New_volcano/Input_files/peaks_inc_24h_vs_00h_ann_gr.rda")
+  dec_024 = loadRData("/home/romuald/Bureau/Analyses_MARS-ATAC/New_volcano/Input_files/peaks_dec_24h_vs_00h_ann_gr.rda") 
+  noc_024 = loadRData("/home/romuald/Bureau/Analyses_MARS-ATAC/New_volcano/Input_files/peaks_noc_24h_vs_00h_ann_gr.rda")
+  
+  all_deseq_peaks = c(inc_024,dec_024,noc_024)
+  
+
+### Rajout du nom des gènes pour lesquels on veut avoir un label sur le volcanoplot
+load("~/Bureau/Analyses_MARS-ATAC/TF_vs_Prom_vs_Expr_redo/intermediary_generated_files/list_target_genes_Change_NoChange_05_24.rda")
+list_gene = unique(gene_list[[2]]$Gene)
+
+# On charge la base de données de promoter que Ravi nous a fourni
+
+load("~/Bureau/Analyses_MARS-ATAC/TF_vs_Prom_vs_Expr_redo/input_files/prom_gene_fantom.rda")
+
+prom_gene_fantom_gr = GRanges(
+  seqnames= prom_gene_fantom$seqnames, 
+  ranges = IRanges(start = prom_gene_fantom$start, end = prom_gene_fantom$end),mcols = prom_gene_fantom$gene)
+
+# On récupère les info des promoteurs de la liste de gène qui nous intresse
+prom_gene_fantom_gr = prom_gene_fantom_gr[prom_gene_fantom_gr$mcols %in% list_gene]
+
+# On créé un Grange de tous les peaks du volcano
+volcano_genes_gr = GRanges(seqnames = d2res$Chr,
+  ranges = IRanges(start = d2res$Start, end = d2res$End))
+
+### Ne récupère que les peaks ATAC (de la gene_list définie auparavant) qui overlap avec des promoteur de la base FANTOM
+peaks_target_of_DE_TF_TSS = findOverlaps(volcano_genes_gr,prom_gene_fantom_gr)
+
+# Indices des peaks de la liste des peaks ATACseq (volnaco_plot_gr) qui overlappent avec les promoteurs des gènes de la liste qui nous intéresse
+overlap_peaks_nb = queryHits(peaks_target_of_DE_TF_TSS) 
+
+# Indices des promoteurs de la liste des promoteurs (prom_gene_fantom_gr) qui overlappent avec les peaks ATAC (volcano plot)
+overlap_prom_nb = subjectHits(peaks_target_of_DE_TF_TSS)
+
+cor_peak_prom_gene = tibble("peak_name" = d2res[overlap_peaks_nb,]$peak_name, "gene_name" = prom_gene_fantom_gr$mcols[overlap_prom_nb])
+cor_peak_prom_gene = distinct(cor_peak_prom_gene)
+
+d2res = inner_join(d2res, cor_peak_prom_gene, by = "peak_name")
+
+### Paramètrage pour le volcanoplot 
+
+plotDF<- d2res[,c(1,6,9,11)]
+
+plotDF = plotDF %>%
+  mutate(new_reg = case_when(
+    pvalue <= 0.01 & log2FoldChange > 0 ~ "Open region",
+    pvalue <= 0.01 & log2FoldChange < 0 ~ "Closed region",
+    TRUE ~ "No change")
+  )
+
+plotDF$new_reg = as.factor(plotDF$new_reg)
+
+# Paramètreage du volcano plot
+
+### Stock les définition des états de peak (ouvert/fermé/bouge pas) dans des variables
+
+downColor <- "red"
+noChangeColor <- "black"
+upColor <- "green4"
+selected_color <- "black"
+
+subtitle = paste("Closed region =", table(plotDF$new_reg)[1],"\n No change region = ", table(plotDF$new_reg)[2], "\n Open region =", table(plotDF$new_reg)[3])
+
+xlimit = 10
+
+p <- ggplot(plotDF, aes(x = log2FoldChange, y = -1 * log10(pvalue), col=new_reg)) +
+  geom_point(size=2, alpha = 0.3) +
+  scale_color_manual(name = "Regulation", values = c(downColor,noChangeColor,upColor)) +
+  scale_shape_manual(name = "Regulation" , values = c(20,20,20)) + 
+  scale_x_continuous(limits = c(-xlimit, xlimit)) + 
+  ylim(NA,10) +
+  labs(title = "Differential accessibility of TF-targeted promoter \n noDE-TF-Targets \n 5H vs 24h",
+    subtitle = subtitle,
+    x = "log2(FoldChange)", y = "-log10(Pvalue)") +
+  theme_tufte()+
+  theme(axis.line.y = element_line(color = "black"),
+    axis.line.x = element_line(color = "black"),
+    legend.text = element_text(size = 10),
+    legend.title = element_text(size = 11),
+    axis.title = element_text(size = 10),
+    plot.subtitle = element_text(size = 11,hjust = 0.5)) 
+
+p
+
+ggsave(p,width = 10,height = 9, filename = "~/Bureau/Analyses_MARS-ATAC/New_volcano/TF-target_accessibility_plot/volcano_noDE-TF_0-24.png")
+
+```
+
+

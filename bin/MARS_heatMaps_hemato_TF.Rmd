@@ -1,0 +1,197 @@
+  ---
+title: "Heatmap 11TF MARSseq"
+author: "Romuald.P"
+date: "26 mai 2020"
+output:
+  html_document:
+    code_folding: "hide"
+    toc: true
+    toc_float: false
+editor_options: 
+  chunk_output_type: inline
+---
+
+```{r librairies, message=F}
+
+library(dplyr)
+library(tidyr)
+library(viridisLite)
+library(ggplot2)
+library(heatmap3)
+library(gridExtra)
+library(cowplot)
+library(ggdendro)
+library(FactoMineR)
+library(dendextend)
+
+```
+
+```{r functions}
+
+loadRData <- function(fileName){ 
+    load(fileName)
+    get(ls()[ls() != "fileName"])
+}
+
+```
+
+
+### Heatmap sans dendogramme
+
+- Heatmap généré avec ggplot2, sans dendogramme car renforce l'aspect non ordonné de la transcrption
+- Note : le gène SMAD6 n'ayant été détecté nul part (d1,d2 tous jours confondus) il n'apparaît pas dans la heatmap 
+
+```{r heat map ggplot sans dendogramme, warning=F,message=F}
+
+matrix = loadRData(
+  fileName = "~/Bureau/MARS_seq_temp/Filtering_data_brut/Script_&_Rapport/Spread_MARSseq_data_all_filters_20200405.rda")
+
+list_TF = c("GATA2; chr3","GATA1; chrX","RUNX1; chr21","SMAD6; chr15","ERG; chr21","SPI1; chr11",
+            "CBFA2T3; chr16","FLI1; chr11","ZFPM1; chr16","HHEX; chr10","TAL1; chr1")
+
+# TF_present = list_TF[list_TF %in% colnames(matrix)]
+
+matrix = matrix %>%
+  pivot_longer(cols = -(c(condition, cell, donor)), 
+               names_to = "transcript_name_chr", 
+               values_to = "UMI_sum")
+
+time_serie = levels(factor(matrix$condition))
+donor_serie = c(1,2)
+
+for(j in 1:2){
+  
+  for(i in 1:5) {
+
+    matrix_plot = matrix %>%
+      filter(transcript_name_chr %in% list_TF) %>%
+      filter(condition == time_serie[i]) %>%
+      filter(donor == donor_serie[j]) %>%
+      mutate(Log2_UMI_sum = log2(UMI_sum +1)) %>%
+      select(donor, condition, cell, transcript_name_chr, UMI_sum, Log2_UMI_sum)
+
+    plot = ggplot(data = matrix_plot, aes(x = cell, y = transcript_name_chr, fill = Log2_UMI_sum)) +
+      geom_tile() +
+      scale_fill_viridis_c(limits = c(0,5)) +
+      theme(axis.text.x = element_blank()) +
+      labs(title = paste0("Time = ", time_serie[i], " | Donor = ", donor_serie[j]),
+           x = "Cells", y = "Transcript name")
+    
+      print(plot)
+  }
+}
+
+```
+
+### Heatmap sans dendogramme
+
+- Heatmap généré avec ggplot2, avec dendogramme
+- Note : le gène SMAD6 n'ayant été détecté nul part (d1,d2 tous jours confondus) il n'apparaît pas dans la heatmap 
+
+```{r heatmap avec dendogramme, warning=F,message=F}
+
+spread_data = loadRData(
+  fileName = "~/Bureau/MARS_seq_temp/Filtering_data_brut/Script_&_Rapport/Spread_MARSseq_data_all_filters_20200405.rda")
+
+list_TF = c("GATA2; chr3","GATA1; chrX","RUNX1; chr21","ERG; chr21","SPI1; chr11",
+            "CBFA2T3; chr16","FLI1; chr11","ZFPM1; chr16","HHEX; chr10","TAL1; chr1")
+
+time_serie = levels(factor(spread_data$condition))
+donor_serie = c(1,2)
+
+ for(j in 1:2) {
+   for(i in 1:5){
+    
+  matrix = spread_data %>%
+    filter(condition == time_serie[i]) %>%
+    filter(donor == donor_serie[j]) %>%
+    select(cell, list_TF)
+   
+  SMAD6 = tibble("SMAD6; chr15" = rep(0,nrow(matrix)))
+  matrix = bind_cols(matrix,SMAD6)
+  
+  matrix = as.matrix(matrix)
+  rownames(matrix) = matrix[,3]
+  matrix = matrix[,-c(1,2,3)]
+  matrix = t(matrix)
+  mode(matrix) = "numeric"
+  matrix = log2(matrix +1)
+
+  dendo_cell = as.dendrogram(hclust(dist(t(matrix))))
+  dend_data = dendro_data(dendo_cell)
+  
+   segment_data <- with(
+    segment(dend_data), 
+    data.frame(x = x, y = y, xend = xend, yend = yend))
+  
+  sample_pos_table <- with(
+    dend_data$labels, 
+    data.frame(x_center = x, sample = as.character(label), width = 1))
+  
+  gene_pos_table <- data.frame(gene = rownames(matrix)) %>%
+    mutate(y_center = (1:n()), 
+           height = 1)
+  
+heatmap_data <- matrix %>% 
+    reshape2::melt(value.name = "expr", varnames = c("gene", "sample")) %>%
+    left_join(sample_pos_table, by = "sample") %>%
+    left_join(gene_pos_table, by = "gene")
+
+heatmap_data$sample = as.character(levels(heatmap_data$sample))[heatmap_data$sample]
+
+sample_axis_limits <- with(
+    sample_pos_table, 
+    c(min(x_center - 0.5 * width), max(x_center + 0.5 * width))
+) + 0.1 * c(-1, 1) # extra spacing: 0.1
+
+plt_hmap <- ggplot(heatmap_data, 
+                   aes(x = x_center, y = y_center, fill = expr, 
+                       height = height, width = width)) + 
+    geom_tile() +
+    scale_fill_viridis_c(limits = c(0,5)) +
+    scale_x_continuous(breaks = sample_pos_table$x_center, 
+                       labels = sample_pos_table$sample, 
+                       limits = sample_axis_limits, 
+                       expand = c(0, 0),
+                       position = "top") +
+    labs(y = "") +
+    # For the y axis, alternatively set the labels as: gene_position_table$gene
+    scale_y_continuous(breaks = gene_pos_table[, "y_center"], 
+                       labels = gene_pos_table$gene,
+                       expand = c(0, 0)) + 
+    xlab(element_blank())+
+    theme(axis.text.x = element_blank(),
+          # margin: top, right, bottom, and left
+          plot.margin = unit(c(0.1, 0.1, 0.1, 0.1), "cm"))
+
+
+  plt_dendr <- ggplot(segment_data) + 
+    geom_segment(aes(x = x, y = y, xend = xend, yend = yend)) + 
+    scale_y_continuous(expand = c(0, 0.5), position = "right") +
+    scale_x_continuous(breaks = sample_pos_table$x_center, 
+                       labels = sample_pos_table$sample, 
+                       limits = sample_axis_limits,
+                       position = "top",
+                       expand = c(0,0))+
+    labs(x = "Cells", y = "", color = "", size = "") +
+    theme_bw() + 
+    theme(panel.grid.minor = element_blank(),
+          axis.text.x = element_text(size = rel(0.7), hjust = -0.05, angle = 45),
+          axis.text.y = element_blank(),
+          # margin: top, right, bottom, and left
+          plot.margin = unit(c(0.7, 1.5, 0, 3.1), "cm"))
+
+  plot = plot_grid(plt_dendr, plt_hmap, align = 'v', axis = "t",ncol = 1, nrow = 2, 
+    labels =  paste0("Time = ", time_serie[i], " | Donor = ", donor_serie[j]))
+  
+print(plot)
+
+ggsave(plot, units = "mm", width = 170, dpi = 600, 
+  filename = paste0("/media/romuald/TOSHIBA EXT/Romuald_NGS/MARSseq_janvier2019/Data_analyse/HeatMaps/Heatmap_donor_",
+                    donor_serie[j],"_",time_serie[i],".pdf"))
+   
+  }
+}
+
+```
+
