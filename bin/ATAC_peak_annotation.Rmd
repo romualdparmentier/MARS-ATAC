@@ -2,7 +2,7 @@
 title: "ATAC peaks annotation"
 author: "Romuald Parmentier"
 date: "`r format(Sys.time(), '%d %B, %Y')`"
-output: 
+: 
   html_document :
     df_print: kable
     highlight: default
@@ -167,7 +167,7 @@ times = c("00h","05h","24h","48h")
 
 peaks_gr_time_annotated_list = list()
 
-# Create a unique folder for output corresponding to the date of the day
+# Create a unique folder for  corresponding to the date of the day
 output_dir = format(Sys.time(), "%Y_%m_%d_%Hh_%Mmin")
 dir.create(path = paste0("/home/romuald/MARS-ATAC/exp/ATAC_peak_annotation/", output_dir))
 
@@ -328,5 +328,141 @@ ggsave(plot,filename = paste0("/home/romuald/MARS-ATAC/exp/ATAC_peak_annotation/
   units = "mm")
 
 ```
+
+```{r}
+
+peaks_ann_list = list.files(
+  path = "~/MARS-ATAC/exp/ATAC_peak_annotation/2021_01_01/",
+  pattern = "peaks_intersection",
+  full.names = T)
+
+
+peak_list = list(
+  "00h" = read.csv2(peaks_ann_list[[1]]), 
+  "5h" = read.csv2(peaks_ann_list[[2]]) , 
+  "24h" = read.csv2(peaks_ann_list[[3]]) , 
+  "48h" = read.csv2(peaks_ann_list[[4]]))
+
+
+#Transform peaks csv datatable into Granges
+
+peaks_gr_list = list()
+
+for(i in 1: length(peak_list)){
+  
+  hg19_seqlengths = c("chr1"=249250621, "chr10"=135534747, "chr11"=135006516, "chr12"=133851895, "chr13"=115169878,
+                      "chr14"=107349540, "chr15"=102531392, "chr16"=90354753, "chr17"=81195210, "chr18"=78077248,
+                      "chr19"=59128983, "chr2"=243199373, "chr20"=63025520, "chr21"=48129895, "chr22"=51304566,
+                      "chr3"=198022430, "chr4"=191154276, "chr5"=180915260, "chr6"=171115067, "chr7"=159138663,
+                      "chr8"=146364022, "chr9"=141213431, "chrMT"=16571, "chrX"=155270560, "chrY"=59373566)
+  
+  gr = GRanges(seqnames = peak_list[[i]]$seqnames,
+                ranges = IRanges(peak_list[[i]]$start, peak_list[[i]]$end),
+                strand = "*")
+  
+  names(gr) = peak_list[[i]]$...1# add peak names to Grange (sample_peak_x)
+  genome(gr) = "hg19" # add genome information to the Grange
+  seqlengths(gr) = hg19_seqlengths # add chr length to each chr
+  
+  peaks_gr_list[[i]] = gr
+  names(peaks_gr_list)[i] = names(peak_list)[i]
+}
+
+# Union des timings : permet de lister toutes les régions où il y a au moins un pic 
+gr_list_union = Reduce(x = peaks_gr_list, f = union)
+
+```
+
+```{r Annotating the genral list of peaks}
+
+all_annotations = loadRData(
+  "/home/romuald/MARS-ATAC/data/Annotation_TSS_pm1kb_int_ex_53utr_ctcf_cpg_woThisto_FANTOM5_prom_gr.rda")
+
+annotations_types = levels(factor(all_annotations$annotation))
+
+# Create a metadata table to add to general peak list
+metadata = matrix(FALSE, ncol = length(annotations_types), nrow = length(gr_list_union))
+  colnames(metadata) = annotations_types
+  mcols(gr_list_union) = metadata
+
+  # for each of the annotations types an overlap is calculated and used to assigned the peak as TRUE when overlapping with the annotation
+  for (i in 1:ncol(metadata)){
+    sub_annot = all_annotations[all_annotations$annotation == annotations_types[i]]
+    overlaps = findOverlaps(gr, sub_annot)
+    mcols(gr)[queryHits(overlaps),i] = TRUE
+  }
+  
+  colnames(mcols(gr_list_union)) = c("UTR3P","UTR5P","CpG", "CTCF","Exons","FANTOM5_promoter", "Introns","TSS_mp1kb")
+
+  mcols(gr_list_union) = as_tibble(mcols(gr_list_union)) %>%
+  dplyr::mutate(Intergenic = ifelse(UTR3P == FALSE & UTR5P == FALSE & Exons == FALSE & Introns == FALSE & TSS_mp1kb == FALSE & FANTOM5_promoter == FALSE, TRUE, FALSE)) %>%
+  dplyr::mutate(CpG_Intergenic = ifelse(Intergenic == TRUE & CpG == TRUE, TRUE, FALSE)) %>%
+  dplyr::mutate(CpG_Intergenic = ifelse(Intergenic == TRUE & CpG == TRUE, TRUE, FALSE)) %>%
+  dplyr::mutate(CTCF_Intergenic = ifelse(Intergenic == TRUE & CTCF == TRUE, TRUE, FALSE)) %>%
+  dplyr::mutate(CTCF_in_intron = ifelse(Introns == TRUE & CTCF == TRUE, TRUE, FALSE)) %>%
+  dplyr::mutate(CTCF_in_exon = ifelse(Exons == TRUE & CTCF == TRUE, TRUE, FALSE)) 
+
+```
+
+```{r Adding time overlap info }
+
+# Test de l'overlap des pics à chaque point de temps contre la liste générée avant.
+# S'il y a une intersection des pics entre les différents points de temps, alors celle-ci a été fusionnée lors de l'union
+# Il suffit alors de voir quels sont les pics qui ont participé à cette union, grâce à l'overlap des pics à chaque point de temps avec celle-ci
+
+overlap_00h_vs_union = findOverlaps(gr_list_union, peaks_gr_list[[1]])
+overlap_sum_up = tibble(queryHits = queryHits(overlap_00h_vs_union), ID_00h = subjectHits(overlap_00h_vs_union))
+
+overlap_05h_vs_union = findOverlaps(gr_list_union, peaks_gr_list[[2]])
+overlap_sum_up = full_join(overlap_sum_up, as.tibble(overlap_05h_vs_union), by = "queryHits") %>% rename(ID_05h = subjectHits)
+
+overlap_24h_vs_union = findOverlaps(gr_list_union, peaks_gr_list[[3]])
+overlap_sum_up = full_join(overlap_sum_up, as.tibble(overlap_24h_vs_union), by = "queryHits") %>% rename(ID_24h = subjectHits)
+
+overlap_48h_vs_union = findOverlaps(gr_list_union, peaks_gr_list[[4]])
+overlap_sum_up = full_join(overlap_sum_up, as.tibble(overlap_48h_vs_union), by = "queryHits") %>% rename(ID_48h = subjectHits)
+overlap_sum_up[is.na(overlap_sum_up)] <- 0
+
+# Replace all peaks ID with 1 (overlap) and 0 when no overlap detected
+df <- mutate_all(overlap_sum_up, ~replace(., .!=0, 1))
+
+# Replace all 0 and 1 with TRUE AND FALSE
+df = mutate_all(
+  .tbl = df,
+  .funs = ~as.logical(.))
+
+overlap_sum_up = bind_cols(
+  Complete_list_ID = overlap_sum_up$queryHits,
+  df[,-1])
+
+# Remove duplicated lines (correpsonding to general peaks touched by multiple peaks)
+overlap_sum_up = overlap_sum_up %>% distinct()
+overlap_sum_up = overlap_sum_up %>% arrange(Complete_list_ID)
+
+metadata = cbind(
+  as.data.frame(overlap_sum_up[-1]), 
+  as.data.frame(mcols(gr_list_union))
+)
+
+colnames(metadata)[1:4] = c(
+  "Overlap_00h",
+  "Overlap_05h",
+  "Overlap_24h",
+  "Overlap_48h")
+
+# Adding overlap information to general list of peaks
+mcols(gr_list_union) = metadata
+
+   write.csv2(
+     x = gr_list_union,
+     file = paste0(
+       "/home/romuald/MARS-ATAC/exp/ATAC_peak_annotation/",
+       output_dir,
+       "/general_peak_list_annotated.csv")
+   )
+
+
+```
+
 
 
